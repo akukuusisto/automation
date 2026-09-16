@@ -1,9 +1,6 @@
 name: openhands-keepalive
 
 # Tönäisee pysähtyneet OpenHands-conversationit (30 min välein).
-#
-# Tämä repo on public, joten standard-runnerit ovat ilmaisia
-# rajattomasti eikä ajoja lasketa Actions-kiintiöön.
 # Idle-raja 15 min: worst-case-viive pysähdyksestä nudgeen on ~45 min
 # (30 min aikataulu + 15 min idle-raja).
 #
