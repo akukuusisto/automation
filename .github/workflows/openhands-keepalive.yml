@@ -1,0 +1,62 @@
+name: openhands-keepalive
+
+# Tönäisee pysähtyneet OpenHands-conversationit (1 h välein).
+#
+# Tämä repo on public, joten standard-runnerit ovat ilmaisia
+# rajattomasti eikä ajoja lasketa Actions-kiintiöön.
+#
+# Tarvittavat Secrets (repo Settings -> Secrets and variables ->
+# Actions -> New repository secret):
+#   OPENHANDS_API_KEY         (app.all-hands.dev -> Settings -> API Keys)
+#   OPENHANDS_CONVERSATION_IDS (pilkulla eroteltu lista conversation-UUID:eja,
+#                               löytyvät selaimen URL:sta .../conversations/<id>)
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Testaa ilman nudge-lähetystä"
+        required: false
+        default: true
+        type: boolean
+
+run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run }})"
+
+permissions:
+  contents: read
+
+# Päällekkäiset ajot jonottavat peräkkäin, eivät koskaan rinnakkain
+# (kaksi nudgea samalle agentille yhtä aikaa olisi sotkua).
+concurrency:
+  group: openhands-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+
+    # Itse tarkistus kestää sekunteja; 10 min on reilu yläraja.
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Run keepalive check (once)
+        shell: bash
+        env:
+          OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
+          OPENHANDS_CONVERSATION_IDS: ${{ secrets.OPENHANDS_CONVERSATION_IDS }}
+          OPENHANDS_IDLE_TIMEOUT: "1200"
+          OPENHANDS_MAX_NUDGES: "5"
+          # Ajastetussa ajossa inputs.dry-run on tyhjä -> oikea moodi.
+          # Manuaaliajossa oletus true -> turvallinen testaus.
+          OPENHANDS_DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          python3 -c "import requests" 2>/dev/null || pip install --quiet requests
+          python3 scripts/openhands-keepalive.py --once
