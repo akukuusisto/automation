@@ -1,9 +1,11 @@
 name: openhands-keepalive
 
-# Tönäisee pysähtyneet OpenHands-conversationit (1 h välein).
+# Tönäisee pysähtyneet OpenHands-conversationit (30 min välein).
 #
 # Tämä repo on public, joten standard-runnerit ovat ilmaisia
 # rajattomasti eikä ajoja lasketa Actions-kiintiöön.
+# Idle-raja 15 min: worst-case-viive pysähdyksestä nudgeen on ~45 min
+# (30 min aikataulu + 15 min idle-raja).
 #
 # Tarvittavat Secrets (repo Settings -> Secrets and variables ->
 # Actions -> New repository secret):
@@ -13,7 +15,7 @@ name: openhands-keepalive
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       dry-run:
@@ -52,7 +54,7 @@ jobs:
         env:
           OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
           OPENHANDS_CONVERSATION_IDS: ${{ secrets.OPENHANDS_CONVERSATION_IDS }}
-          OPENHANDS_IDLE_TIMEOUT: "1200"
+          OPENHANDS_IDLE_TIMEOUT: "900"
           OPENHANDS_MAX_NUDGES: "5"
           # Ajastetussa ajossa inputs.dry-run on tyhjä -> oikea moodi.
           # Manuaaliajossa oletus true -> turvallinen testaus.
