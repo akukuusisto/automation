@@ -1,8 +1,14 @@
 name: openhands-keepalive
 
-# Tönäisee pysähtyneet OpenHands-conversationit (30 min välein).
-# Idle-raja 15 min: worst-case-viive pysähdyksestä nudgeen on ~45 min
-# (30 min aikataulu + 15 min idle-raja).
+# Tönäisee pysähtyneet OpenHands-conversationit (5 min välein, offset).
+# Idle-raja 15 min: worst-case-viive pysähdyksestä nudgeen on ~20 min
+# (5 min aikataulu + 15 min idle-raja), jos yksikään ajo ei tipu jonosta.
+#
+# GitHub schedule ei ole taattu: ruuhkassa ajoja viivästyy tai tippuu
+# kokonaan. Siksi 5 min väli (minimi) + offset pois tasatunneilta, jotta
+# tunnissa tulee edes yksi ajo läpi.
+# Lähteet: docs "High load times include the start of every hour",
+# "some queued jobs may be dropped"; käytäntö: vältä :00/:15/:30.
 #
 # Tarvittavat Secrets (repo Settings -> Secrets and variables ->
 # Actions -> New repository secret):
@@ -12,7 +18,9 @@ name: openhands-keepalive
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # 5 min välein, mutta offset 2 min: 02,07,12,17,22,27,32,37,42,47,52,57.
+    # Ei osuta :00/:05/...-ruuhkapiikkeihin, joissa GitHub tiputtaa ajoja.
+    - cron: "2-57/5 * * * *"
   workflow_dispatch:
     inputs:
       dry-run:
@@ -21,7 +29,7 @@ on:
         default: true
         type: boolean
 
-run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run }})"
+run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }})"
 
 permissions:
   contents: read
@@ -53,9 +61,9 @@ jobs:
           OPENHANDS_CONVERSATION_IDS: ${{ secrets.OPENHANDS_CONVERSATION_IDS }}
           OPENHANDS_IDLE_TIMEOUT: "900"
           OPENHANDS_MAX_NUDGES: "5"
-          # Ajastetussa ajossa inputs.dry-run on tyhjä -> oikea moodi.
+          # Ajastetussa ajossa inputs.dry-run on tyhjä -> || false -> oikea moodi.
           # Manuaaliajossa oletus true -> turvallinen testaus.
-          OPENHANDS_DRY_RUN: ${{ inputs.dry-run }}
+          OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
         run: |
           python3 -c "import requests" 2>/dev/null || pip install --quiet requests
           python3 scripts/openhands-keepalive.py --once
