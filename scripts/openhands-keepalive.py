@@ -32,11 +32,14 @@ Ympäristömuuttujat:
 
 Suositellut oletukset:
   jatkuva vahti: poll interval = 120 s, idle timeout = 1200 s (20 min)
-  GitHub Actions: cron 15 min välein + --once + idle timeout 1200 s
+  GitHub Actions: cron 5 min välein + --once + idle timeout 900 s (15 min)
 
-Huom: DONE-vastaus näkyy vain ihmiselle UI:ssa. Skripti ei lue
-keskustelun viestejä, joten se ei pysähdy automaattisesti DONEen —
-pysäytä vahti / poista ID listasta kun tehtävä on valmis.
+DONE-pysäytys: ennen nudgea haetaan tuoreimmat MessageEventit
+(GET /api/v1/conversation/{id}/events/search). Jos uusin viesti
+kokonaisuudessaan on agentin täsmällinen "DONE", nudgea ei lähetetä
+(outcome "done"). Jos käyttäjä on puhunut sen jälkeen, valvonta
+jatkuu normaalisti. Tarkistus on fail-open: jos event-haku
+epäonnistuu, toimitaan kuten ennenkin (tönäistään).
 
 Logiikka per conversation:
   - GET conversation -> sandbox_status + execution_status + updated_at
@@ -46,7 +49,8 @@ Logiikka per conversation:
   - running -> odota
   - waiting_for_confirmation -> älä tönäise, ihminen tarvitaan
   - finished / idle / stuck -> jos updated_at on yli idle-timeoutin
-    vanha, lähetä nudge (max-nudges raja per conversation)
+    vanha, tarkista DONE ja lähetä nudge (max-nudges raja per conversation)
+  - uusin viesti on agentin "DONE" -> ei tönäistä (done)
   - sandbox ERROR/MISSING -> kyseisen conversationin valvonta lopetetaan
 """
 
@@ -149,6 +153,15 @@ def parse_args():
         "(GitHub Actions -moodi)",
     )
 
+    parser.add_argument(
+        "--no-done-check",
+        action="store_true",
+        default=os.getenv("OPENHANDS_NO_DONE_CHECK", "").lower()
+        in ("1", "true", "yes", "on"),
+        help="Älä tarkista DONE-viestiä ennen nudgea "
+        "(hätäkatkaisin, jos event-haku oireilee)",
+    )
+
     return parser.parse_args()
 
 
@@ -203,6 +216,120 @@ def get_conversation(base_url, headers, conversation_id):
         raise RuntimeError("Conversation not found")
 
     return items[0]
+
+
+def _event_text(event):
+    """Poimi viestin teksti MessageEvent-muodoista puolustautuen.
+
+    Palauttaa tekstin tai tyhjän merkkijonon, ei koskaan heitä.
+    """
+    try:
+        if not isinstance(event, dict):
+            return ""
+        for key in ("llm_message", "message", "content", "text"):
+            value = event.get(key)
+            text = _coerce_text(value)
+            if text:
+                return text
+        return ""
+    except Exception:
+        return ""
+
+
+def _coerce_text(value):
+    """Muunna merkkijono / content-lista / dict tekstiksi."""
+    try:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = [_coerce_text(item) for item in value]
+            return "".join(p for p in parts if p)
+        if isinstance(value, dict):
+            # OpenAI-tyyli: {"type": "text", "text": "..."}
+            # tai {"role": ..., "content": ...}
+            if isinstance(value.get("text"), str):
+                return value["text"]
+            if "content" in value:
+                return _coerce_text(value["content"])
+            return ""
+        return ""
+    except Exception:
+        return ""
+
+
+def _event_timestamp(event):
+    """Eventin timestamp Unix-timena (0.0 jos puuttuu/virheellinen)."""
+    try:
+        if isinstance(event, dict):
+            return parse_updated_at(event.get("timestamp", ""))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def is_done(events):
+    """Onko uusin viesti kokonaisuudessaan agentin täsmällinen DONE?
+
+    Sääntö: uusin viesti overall ratkaisee. Jos agentti vastasi DONE
+    mutta käyttäjä puhui sen jälkeen, kyseessä on uusi tehtävä eikä
+    DONEa huomioida. Täsmää vain tasan "DONE" (whitespace + case
+    sallitaan), jotta "DONE!" tai lauseen sisäinen maininta ei
+    pysäytä valvontaa vahingossa.
+    """
+    try:
+        if not events:
+            return False
+        messages = [
+            e for e in events
+            if isinstance(e, dict)
+            and e.get("source") in ("agent", "user")
+            and _event_text(e).strip()
+        ]
+        if not messages:
+            return False
+        # Uusin ensin: timestampilla jos saatavilla, muuten listajärjestys.
+        if any(_event_timestamp(e) > 0 for e in messages):
+            messages.sort(key=_event_timestamp, reverse=True)
+        else:
+            messages = messages[::-1]
+        latest = messages[0]
+        if latest.get("source") != "agent":
+            return False
+        return _event_text(latest).strip().upper() == "DONE"
+    except Exception:
+        return False
+
+
+def fetch_recent_messages(base_url, headers, conversation_id, limit=20):
+    """Hae tuoreimmat MessageEventit. Palauttaa listan tai None.
+
+    None = haku epäonnistui -> kutsujan kuuluu jatkaa vanhalla
+    logiikalla (fail-open), ei koskaan pysäyttää valvontaa.
+    """
+    try:
+        response = requests.get(
+            f"{base_url}/api/v1/conversation/"
+            f"{conversation_id}/events/search",
+            headers=headers,
+            params={"kind__eq": "MessageEvent", "limit": limit},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            for key in ("items", "results", "events"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+            return []
+        if isinstance(payload, list):
+            return payload
+        return []
+    except Exception as exc:
+        print(f"  DONE-tarkistus epäonnistui: {exc} -> jatketaan normaalisti.")
+        return None
 
 
 def try_resume(base_url, headers, sandbox_id, dry_run):
@@ -424,6 +551,22 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 )
                 return "retire-max"
 
+            # --------------------------------------------------
+            # DONE-tarkistus: vain kun nudge olisi muuten lähdössä,
+            # jotta event-haku ei kuormita joka pollia. Fail-open:
+            # epäonnistunut haku ei estä nudgea.
+            # --------------------------------------------------
+            if not args.no_done_check:
+                recent = fetch_recent_messages(
+                    base_url, headers, conv_id
+                )
+                if recent is not None and is_done(recent):
+                    print(
+                        "  Uusin viesti on agentin DONE -> "
+                        "tehtävä valmis, ei tönäistä."
+                    )
+                    return "done"
+
             next_nudge = nudges + 1
             print(
                 f"  Agentti pysähtynyt "
@@ -593,7 +736,7 @@ def main():
             except KeyboardInterrupt:
                 print("\nLopetetaan käyttäjän pyynnöstä.")
                 return
-            if outcome in ("retire-sandbox", "retire-max"):
+            if outcome in ("retire-sandbox", "retire-max", "done"):
                 active.remove(cid)
         if not active:
             print("Kaikki conversationit eläköity -> lopetetaan.")
