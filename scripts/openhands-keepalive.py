@@ -26,7 +26,6 @@ Ympäristömuuttujat:
   OPENHANDS_BASE_URL
   OPENHANDS_POLL_INTERVAL
   OPENHANDS_IDLE_TIMEOUT
-  OPENHANDS_MAX_NUDGES
   OPENHANDS_RESUME_COOLDOWN
   OPENHANDS_DRY_RUN=1          (ei lähetä nudgeja/resumeja, vain logittaa)
 
@@ -43,13 +42,13 @@ epäonnistuu, toimitaan kuten ennenkin (tönäistään).
 
 Logiikka per conversation:
   - GET conversation -> sandbox_status + execution_status + updated_at
-  - sandbox PAUSED -> yritä resumea (cooldownilla), ei tönäistä
+  - sandbox PAUSED -> yritä resumea (cooldownilla), nudge jos liian kauan idle
   - sandbox STARTING / muu ei-RUNNING -> odota, ei tönäistä
     (execution_status on None kun sandbox ei ole RUNNING)
   - running -> odota
   - waiting_for_confirmation -> älä tönäise, ihminen tarvitaan
   - finished / idle / stuck -> jos updated_at on yli idle-timeoutin
-    vanha, tarkista DONE ja lähetä nudge (max-nudges raja per conversation)
+    vanha, tarkista DONE ja lähetä nudge
   - uusin viesti on agentin "DONE" -> ei tönäistä (done)
   - sandbox ERROR/MISSING -> kyseisen conversationin valvonta lopetetaan
 """
@@ -122,13 +121,6 @@ def parse_args():
         type=int,
         default=int(os.getenv("OPENHANDS_IDLE_TIMEOUT", "1200")),
         help="Idle-aika ennen nudgea sekunteina (default 1200 = 20 min)",
-    )
-
-    parser.add_argument(
-        "--max-nudges",
-        type=int,
-        default=int(os.getenv("OPENHANDS_MAX_NUDGES", "5")),
-        help="Maksimi nudgeja per conversation (0 = rajaton)",
     )
 
     parser.add_argument(
@@ -458,7 +450,7 @@ def check_conversation(base_url, headers, conv_id, args, state):
             return "retire-sandbox"
 
         # --------------------------------------------------
-        # Sandbox PAUSED -> resume (cooldownilla), ei tönäistä
+        # Sandbox PAUSED -> resume (cooldownilla) + nudge jos liian kauan idle
         # --------------------------------------------------
         if sandbox_status == "PAUSED":
             last_resume = state["last_resume"].get(conv_id, 0.0)
@@ -481,6 +473,50 @@ def check_conversation(base_url, headers, conv_id, args, state):
                     f"  Sandbox PAUSED -> "
                     f"resume cooldown, {remaining}s jäljellä."
                 )
+
+            # Tarkista onko conversation ollut liian kauan idle PAUSED-tilassa
+            # Jos on, lähetä nudge vaikka resume on cooldownissa
+            if idle_for is not None and idle_for >= args.idle_timeout:
+                # DONE-tarkistus myös PAUSED-tilassa
+                if not args.no_done_check:
+                    recent = fetch_recent_messages(
+                        base_url, headers, conv_id
+                    )
+                    if recent is not None and is_done(recent):
+                        print(
+                            "  Uusin viesti on agentin DONE -> "
+                            "tehtävä valmis, ei tönäistä."
+                        )
+                        return "done"
+
+                next_nudge = nudges + 1
+                print(
+                    f"  PAUSED ja {idle_for}s idle -> "
+                    f"nudge {next_nudge}"
+                )
+
+                if send_nudge(
+                    base_url,
+                    headers,
+                    conv_id,
+                    args.nudge,
+                    dry_run,
+                ):
+                    state["nudges"][conv_id] = next_nudge
+                    print(
+                        "  Nudge lähetetty -> "
+                        "odotetaan seuraavaa pollia."
+                        if not dry_run
+                        else "  (dry-run, ei lasketa)"
+                    )
+                    return "dry-nudge" if dry_run else "nudged"
+
+                print(
+                    "  Nudge ei mennyt läpi -> "
+                    "yritetään myöhemmin uudelleen."
+                )
+                return "nudge-failed"
+
             return "paused"
 
         # --------------------------------------------------
@@ -543,14 +579,6 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 )
                 return "idle-wait"
 
-            if args.max_nudges > 0 and nudges >= args.max_nudges:
-                print(
-                    f"  max-nudges "
-                    f"({args.max_nudges}) täynnä -> "
-                    "tämän conversationin valvonta lopetetaan."
-                )
-                return "retire-max"
-
             # --------------------------------------------------
             # DONE-tarkistus: vain kun nudge olisi muuten lähdössä,
             # jotta event-haku ei kuormita joka pollia. Fail-open:
@@ -573,11 +601,6 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 f"({execution_status}), "
                 f"{idle_for}s idle -> "
                 f"nudge {next_nudge}"
-                + (
-                    f"/{args.max_nudges}"
-                    if args.max_nudges > 0
-                    else ""
-                )
             )
 
             if send_nudge(
@@ -693,11 +716,6 @@ def main():
         f"idle timeout: {args.idle_timeout}s "
         f"({args.idle_timeout / 60:.1f} min)"
     )
-    print(
-        f"max nudges: "
-        f"{args.max_nudges if args.max_nudges else 'unlimited'}"
-        " per conversation"
-    )
     if args.dry_run:
         print("DRY-RUN: ei lähetetä nudgeja/resumeja")
     print()
@@ -736,7 +754,7 @@ def main():
             except KeyboardInterrupt:
                 print("\nLopetetaan käyttäjän pyynnöstä.")
                 return
-            if outcome in ("retire-sandbox", "retire-max", "done"):
+            if outcome in ("retire-sandbox", "done"):
                 active.remove(cid)
         if not active:
             print("Kaikki conversationit eläköity -> lopetetaan.")
