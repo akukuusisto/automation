@@ -440,14 +440,78 @@ def check_conversation(base_url, headers, conv_id, args, state):
         )
 
         # --------------------------------------------------
-        # Sandbox terminaalitila -> valvonta loppuu tältä osin
+        # Sandbox MISSING -> terminaalitila, eläköi
         # --------------------------------------------------
-        if sandbox_status in ("ERROR", "MISSING"):
+        if sandbox_status == "MISSING":
+            # Tarkista DONE ennen eläköintiä
+            if not args.no_done_check:
+                recent = fetch_recent_messages(
+                    base_url, headers, conv_id
+                )
+                if recent is not None and is_done(recent):
+                    print(
+                        "  Sandbox MISSING: "
+                        "tehtävä valmis (DONE), valvonta lopetetaan."
+                    )
+                    return "done"
+
             print(
-                f"  Sandbox {sandbox_status}: "
-                "tämän conversationin valvonta lopetetaan."
+                "  Sandbox MISSING: "
+                "poistettu, valvonta lopetetaan."
             )
             return "retire-sandbox"
+
+        # --------------------------------------------------
+        # Sandbox ERROR -> yritä nudgea jos liian kauan idle
+        # --------------------------------------------------
+        if sandbox_status == "ERROR":
+            # Tarkista DONE ensin
+            if not args.no_done_check:
+                recent = fetch_recent_messages(
+                    base_url, headers, conv_id
+                )
+                if recent is not None and is_done(recent):
+                    print(
+                        "  Sandbox ERROR: "
+                        "tehtävä valmis (DONE), valvonta lopetetaan."
+                    )
+                    return "done"
+
+            # Jos idle timeout ylitetty, yritä nudgea
+            if idle_for is not None and idle_for >= args.idle_timeout:
+                next_nudge = nudges + 1
+                print(
+                    f"  ERROR ja {idle_for}s idle -> "
+                    f"nudge {next_nudge}"
+                )
+
+                if send_nudge(
+                    base_url,
+                    headers,
+                    conv_id,
+                    args.nudge,
+                    dry_run,
+                ):
+                    state["nudges"][conv_id] = next_nudge
+                    print(
+                        "  Nudge lähetetty -> "
+                        "odotetaan seuraavaa pollia."
+                        if not dry_run
+                        else "  (dry-run, ei lasketa)"
+                    )
+                    return "dry-nudge" if dry_run else "nudged"
+
+                print(
+                    "  Nudge ei mennyt läpi -> "
+                    "yritetään myöhemmin uudelleen."
+                )
+                return "nudge-failed"
+
+            print(
+                f"  Sandbox ERROR: "
+                f"odotetaan idle timeoutia ({idle_for}s / {args.idle_timeout}s)."
+            )
+            return "error-wait"
 
         # --------------------------------------------------
         # Sandbox PAUSED -> resume (cooldownilla) + nudge jos liian kauan idle
