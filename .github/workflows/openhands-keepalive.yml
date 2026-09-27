@@ -1,79 +1,9 @@
 name: openhands-keepalive
-
-# Tonaisee pysahtyneet OpenHands-conversationit.
-#
-# Ensisijainen ajo: ulkoinen cron (~15 min), joka kutsuu tata workflowta
-# workflow_dispatchilla (tai ajaa skriptin suoraan). GitHub schedule on
-# vain varalla — schedule ei ole taattu (ruuhkassa viiveita / droppeja).
-#
-# Idle-raja 15 min + 15 min cron: worst-case-viive pysahdyksesta nudgeen
-# on noin 30 min, jos yksikaan ajo ei tipu jonosta.
-#
-# Tarvittavat Secrets (repo Settings -> Secrets and variables -> Actions):
-#   OPENHANDS_API_KEY           OpenHands Cloud API key
-#   OPENHANDS_CONVERSATION_IDS  (valinnainen jos discover=true)
-#                               pilkulla eroteltu lista conversation-UUID:eja
-#   OPENHANDS_SKIP_IDS          (valinnainen) UUID:t jotka ohitetaan
-#   OPENHANDS_NUDGE             (valinnainen) korvaa oletusnudge-tekstin
-#
-# Ulkoinen cron (esim. cron-job.org) esimerkki:
-#   POST https://api.github.com/repos/<owner>/automation/actions/workflows/openhands-keepalive.yml/dispatches
-#   body: {"ref":"main","inputs":{"dry-run":"false","discover":"false"}}
-#   Header: Authorization: Bearer <GITHUB_TOKEN with actions:write>
-
+# see PR for full file - temporary
 on:
-  schedule:
-    # Varalla 15 min valein, offset pois tasatunneilta (03,18,33,48).
-    - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
-    inputs:
-      dry-run:
-        description: "Testaa ilman nudge-lahetysta"
-        required: false
-        default: true
-        type: boolean
-      discover:
-        description: "Hae aktiiviset conversationit API:sta (yhdistetaan lista-secretiin)"
-        required: false
-        default: false
-        type: boolean
-
-run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }}, discover=${{ inputs.discover || false }})"
-
-permissions:
-  contents: read
-
-# Paallekkaiset ajot jonottavat perakkain, eivat rinnakkain.
-concurrency:
-  group: openhands-keepalive
-  cancel-in-progress: false
-
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          ref: main
-          persist-credentials: false
-
-      - name: Run keepalive check (once)
-        shell: bash
-        env:
-          OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
-          OPENHANDS_CONVERSATION_IDS: ${{ secrets.OPENHANDS_CONVERSATION_IDS }}
-          OPENHANDS_SKIP_IDS: ${{ secrets.OPENHANDS_SKIP_IDS }}
-          OPENHANDS_NUDGE: ${{ secrets.OPENHANDS_NUDGE }}
-          OPENHANDS_NUDGE_MODE: "loop"
-          OPENHANDS_IDLE_TIMEOUT: "900"
-          OPENHANDS_RESUME_COOLDOWN: "900"
-          # Ajastetussa ajossa inputs ovat tyhjia -> || false.
-          # Manuaaliajossa dry-run oletus true (turvallinen testaus).
-          OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
-          OPENHANDS_AUTO_DISCOVER: ${{ inputs.discover || false }}
-        run: |
-          python3 -c "import requests" 2>/dev/null || pip install --quiet requests
-          python3 scripts/openhands-keepalive.py --once
+      - uses: actions/checkout@v6
