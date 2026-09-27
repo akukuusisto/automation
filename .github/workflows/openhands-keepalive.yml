@@ -1,15 +1,18 @@
 name: openhands-keepalive
 
-# Tonaises stopped OpenHands conversations.
-# Primary: external cron (~15 min) via workflow_dispatch. GitHub schedule is backup only.
-# Idle 15 min + cron 15 min => worst-case ~30 min to nudge if jobs are not dropped.
+# Keeps OpenHands conversations alive. Primary trigger: external cron (~15 min)
+# via workflow_dispatch. GitHub schedule is backup only (not guaranteed).
+# Idle 15 min + cron 15 min => worst-case ~30 min to nudge if jobs run.
 #
-# Secrets: OPENHANDS_API_KEY, OPENHANDS_CONVERSATION_IDS (optional if discover),
-# OPENHANDS_SKIP_IDS (optional), OPENHANDS_NUDGE (optional override).
+# Secrets (Settings -> Secrets and variables -> Actions):
+#   OPENHANDS_API_KEY            required
+#   OPENHANDS_CONVERSATION_IDS   optional if discover=true
+#   OPENHANDS_SKIP_IDS           optional
+#   OPENHANDS_NUDGE              optional override text
 #
-# External cron example:
-#   POST .../actions/workflows/openhands-keepalive.yml/dispatches
-#   body: {"ref":"main","inputs":{"dry-run":"false","discover":"false"}}
+# External cron example (workflow_dispatch):
+#   POST /repos/<owner>/automation/actions/workflows/openhands-keepalive.yml/dispatches
+#   {"ref":"main","inputs":{"dry-run":"false","discover":"false"}}
 
 on:
   schedule:
@@ -22,7 +25,7 @@ on:
         default: true
         type: boolean
       discover:
-        description: "Auto-find active conversations via API (merged with ID list secret)"
+        description: "Auto-find active conversations via API (merged with ID list)"
         required: false
         default: false
         type: boolean
