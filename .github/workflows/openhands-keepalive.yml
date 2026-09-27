@@ -1,9 +1,63 @@
 name: openhands-keepalive
-# see PR for full file - temporary
+
+# Tonaises stopped OpenHands conversations.
+# Primary: external cron (~15 min) via workflow_dispatch. GitHub schedule is backup only.
+# Idle 15 min + cron 15 min => worst-case ~30 min to nudge if jobs are not dropped.
+#
+# Secrets: OPENHANDS_API_KEY, OPENHANDS_CONVERSATION_IDS (optional if discover),
+# OPENHANDS_SKIP_IDS (optional), OPENHANDS_NUDGE (optional override).
+#
+# External cron example:
+#   POST .../actions/workflows/openhands-keepalive.yml/dispatches
+#   body: {"ref":"main","inputs":{"dry-run":"false","discover":"false"}}
+
 on:
+  schedule:
+    - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Test without sending nudges"
+        required: false
+        default: true
+        type: boolean
+      discover:
+        description: "Auto-find active conversations via API (merged with ID list secret)"
+        required: false
+        default: false
+        type: boolean
+
+run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }}, discover=${{ inputs.discover || false }})"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openhands-keepalive
+  cancel-in-progress: false
+
 jobs:
   keepalive:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Run keepalive check (once)
+        shell: bash
+        env:
+          OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
+          OPENHANDS_CONVERSATION_IDS: ${{ secrets.OPENHANDS_CONVERSATION_IDS }}
+          OPENHANDS_SKIP_IDS: ${{ secrets.OPENHANDS_SKIP_IDS }}
+          OPENHANDS_NUDGE: ${{ secrets.OPENHANDS_NUDGE }}
+          OPENHANDS_NUDGE_MODE: "loop"
+          OPENHANDS_IDLE_TIMEOUT: "900"
+          OPENHANDS_RESUME_COOLDOWN: "900"
+          OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
+          OPENHANDS_AUTO_DISCOVER: ${{ inputs.discover || false }}
+        run: |
+          python3 -c "import requests" 2>/dev/null || pip install --quiet requests
+          python3 scripts/openhands-keepalive.py --once
