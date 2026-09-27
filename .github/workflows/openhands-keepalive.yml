@@ -1,41 +1,40 @@
 name: openhands-keepalive
 
-# Tönäisee pysähtyneet OpenHands-conversationit (5 min välein, offset).
-# Idle-raja 15 min: worst-case-viive pysähdyksestä nudgeen on ~20 min
-# (5 min aikataulu + 15 min idle-raja), jos yksikään ajo ei tipu jonosta.
+# Keeps OpenHands conversations alive. Primary trigger: external cron (~15 min)
+# via workflow_dispatch. GitHub schedule is backup only (not guaranteed).
+# Idle 15 min + cron 15 min => worst-case ~30 min to nudge if jobs run.
 #
-# GitHub schedule ei ole taattu: ruuhkassa ajoja viivästyy tai tippuu
-# kokonaan. Siksi 5 min väli (minimi) + offset pois tasatunneilta, jotta
-# tunnissa tulee edes yksi ajo läpi.
-# Lähteet: docs "High load times include the start of every hour",
-# "some queued jobs may be dropped"; käytäntö: vältä :00/:15/:30.
+# Secrets (Settings -> Secrets and variables -> Actions):
+#   OPENHANDS_API_KEY            required
+#   OPENHANDS_CONVERSATION_IDS   optional if discover=true
+#   OPENHANDS_SKIP_IDS           optional
+#   OPENHANDS_NUDGE              optional override text
 #
-# Tarvittavat Secrets (repo Settings -> Secrets and variables ->
-# Actions -> New repository secret):
-#   OPENHANDS_API_KEY         (app.all-hands.dev -> Settings -> API Keys)
-#   OPENHANDS_CONVERSATION_IDS (pilkulla eroteltu lista conversation-UUID:eja,
-#                               löytyvät selaimen URL:sta .../conversations/<id>)
+# External cron example (workflow_dispatch):
+#   POST /repos/<owner>/automation/actions/workflows/openhands-keepalive.yml/dispatches
+#   {"ref":"main","inputs":{"dry-run":"false","discover":"false"}}
 
 on:
   schedule:
-    # 5 min välein, mutta offset 2 min: 02,07,12,17,22,27,32,37,42,47,52,57.
-    # Ei osuta :00/:05/...-ruuhkapiikkeihin, joissa GitHub tiputtaa ajoja.
-    - cron: "2-57/5 * * * *"
+    - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
     inputs:
       dry-run:
-        description: "Testaa ilman nudge-lähetystä"
+        description: "Test without sending nudges"
         required: false
         default: true
         type: boolean
+      discover:
+        description: "Auto-find active conversations via API (merged with ID list)"
+        required: false
+        default: false
+        type: boolean
 
-run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }})"
+run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }}, discover=${{ inputs.discover || false }})"
 
 permissions:
   contents: read
 
-# Päällekkäiset ajot jonottavat peräkkäin, eivät koskaan rinnakkain
-# (kaksi nudgea samalle agentille yhtä aikaa olisi sotkua).
 concurrency:
   group: openhands-keepalive
   cancel-in-progress: false
@@ -43,27 +42,24 @@ concurrency:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-
-    # Itse tarkistus kestää sekunteja; 10 min on reilu yläraja.
     timeout-minutes: 10
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: main
           persist-credentials: false
-
       - name: Run keepalive check (once)
         shell: bash
         env:
           OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
           OPENHANDS_CONVERSATION_IDS: ${{ secrets.OPENHANDS_CONVERSATION_IDS }}
+          OPENHANDS_SKIP_IDS: ${{ secrets.OPENHANDS_SKIP_IDS }}
+          OPENHANDS_NUDGE: ${{ secrets.OPENHANDS_NUDGE }}
+          OPENHANDS_NUDGE_MODE: "loop"
           OPENHANDS_IDLE_TIMEOUT: "900"
-          OPENHANDS_MAX_NUDGES: "5"
-          # Ajastetussa ajossa inputs.dry-run on tyhjä -> || false -> oikea moodi.
-          # Manuaaliajossa oletus true -> turvallinen testaus.
+          OPENHANDS_RESUME_COOLDOWN: "900"
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
+          OPENHANDS_AUTO_DISCOVER: ${{ inputs.discover || false }}
         run: |
           python3 -c "import requests" 2>/dev/null || pip install --quiet requests
           python3 scripts/openhands-keepalive.py --once

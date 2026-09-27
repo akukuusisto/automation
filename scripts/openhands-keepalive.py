@@ -1,57 +1,12 @@
 #!/usr/bin/env python3
+"""OpenHands Cloud keepalive / auto-nudge.
+
+Monitors conversations and sends a continuity nudge when idle too long.
+
+Modes: --once (cron/Actions), continuous poll, --discover (API auto-list).
+Nudge modes: loop (default) or task. See --help and workflow comments.
 """
-OpenHands Cloud keepalive / auto-nudge.
-
-Valvoo yhtä tai useampaa OpenHands-conversationia ja lähettää
-jatkoviestin, jos agentti on ollut pitkään pysähtyneenä.
-
-Kaksi ajotapaa:
-
-1. Jatkuva vahti (kotikone / palvelin):
-   python scripts/openhands-keepalive.py --conversation-id <uuid>
-
-2. Kertatarkistus (GitHub Actions, cron hoitaa toiston):
-   python scripts/openhands-keepalive.py --once
-
-Useampi conversation:
-   --conversation-id <uuid1> --conversation-id <uuid2>
-   tai OPENHANDS_CONVERSATION_IDS="uuid1,uuid2,uuid3"
-   (vanha OPENHANDS_CONVERSATION_ID toimii yhä yhdelle)
-
-Ympäristömuuttujat:
-  OPENHANDS_API_KEY            (pakollinen)
-  OPENHANDS_CONVERSATION_ID    (yksi, legacy)
-  OPENHANDS_CONVERSATION_IDS   (pilkulla eroteltu lista)
-  OPENHANDS_NUDGE
-  OPENHANDS_BASE_URL
-  OPENHANDS_POLL_INTERVAL
-  OPENHANDS_IDLE_TIMEOUT
-  OPENHANDS_RESUME_COOLDOWN
-  OPENHANDS_DRY_RUN=1          (ei lähetä nudgeja/resumeja, vain logittaa)
-
-Suositellut oletukset:
-  jatkuva vahti: poll interval = 120 s, idle timeout = 1200 s (20 min)
-  GitHub Actions: cron 5 min välein + --once + idle timeout 900 s (15 min)
-
-DONE-pysäytys: ennen nudgea haetaan tuoreimmat MessageEventit
-(GET /api/v1/conversation/{id}/events/search). Jos uusin viesti
-kokonaisuudessaan on agentin täsmällinen "DONE", nudgea ei lähetetä
-(outcome "done"). Jos käyttäjä on puhunut sen jälkeen, valvonta
-jatkuu normaalisti. Tarkistus on fail-open: jos event-haku
-epäonnistuu, toimitaan kuten ennenkin (tönäistään).
-
-Logiikka per conversation:
-  - GET conversation -> sandbox_status + execution_status + updated_at
-  - sandbox PAUSED -> yritä resumea (cooldownilla), nudge jos liian kauan idle
-  - sandbox STARTING / muu ei-RUNNING -> odota, ei tönäistä
-    (execution_status on None kun sandbox ei ole RUNNING)
-  - running -> odota
-  - waiting_for_confirmation -> älä tönäise, ihminen tarvitaan
-  - finished / idle / stuck -> jos updated_at on yli idle-timeoutin
-    vanha, tarkista DONE ja lähetä nudge
-  - uusin viesti on agentin "DONE" -> ei tönäistä (done)
-  - sandbox ERROR/MISSING -> kyseisen conversationin valvonta lopetetaan
-"""
+from __future__ import annotations
 
 import argparse
 import datetime
@@ -62,226 +17,184 @@ import time
 try:
     import requests
 except ImportError:
-    print(
-        "requests puuttuu. Asenna:\n"
-        "  python -m pip install requests",
-        file=sys.stderr,
-    )
+    print("requests puuttuu. Asenna:\n  python -m pip install requests", file=sys.stderr)
     sys.exit(1)
 
+DEFAULT_NUDGE_LOOP = (
+    "Jatka autonomista looppia ty\u00f6nkulkusi mukaan.\n\n"
+    "1) Tarkista nykyinen tila (git, avoimet ty\u00f6t, roadmap).\n"
+    "2) Jatka kesken olevaa ty\u00f6t\u00e4 ilman turhaa selittely\u00e4.\n"
+    "3) Ennen uuden ty\u00f6n aloittamista tarkista git, avoimet PR:t ja issue-ty\u00f6 "
+    "sek\u00e4 varmista, ettei toinen agentti tee samaa ty\u00f6t\u00e4. V\u00e4lt\u00e4 duplikaatit.\n"
+    "4) Jos nykyiset teht\u00e4v\u00e4t loppuvat: ota lis\u00e4\u00e4 t\u00f6it\u00e4 roadmapilta "
+    "tai avoimista issueista (kun s\u00e4\u00e4nn\u00f6t sen sallivat).\n"
+    "5) Jos roadmapkin on tyhj\u00e4: tutki mit\u00e4 sovelluksesta puuttuu "
+    "isommana kokonaisuutena, lis\u00e4\u00e4 suosituksesi roadmapille ja "
+    "ota se ty\u00f6st\u00f6\u00f6n.\n"
+    "6) Pushaa muutokset normaalilla kadenssilla. \u00c4l\u00e4 mergaa "
+    "suojattuihin haaroihin ilman erillist\u00e4 ohjetta.\n\n"
+    "\u00c4l\u00e4 vastaa pelk\u00e4ll\u00e4 DONE. Jos looppi on tietoisesti lopetettava, "
+    "vastaa t\u00e4sm\u00e4lleen:\n"
+    "LOOP-STOP"
+)
 
-DEFAULT_NUDGE = (
-    "Jatka tehtävää siitä mihin jäit.\n\n"
-    "Tarkista ensin nykyinen tila ja jatka itse tehtävän suorittamista "
-    "ilman turhaa selittelyä.\n\n"
-    "Jos tehtävä on täysin valmis, vastaa täsmälleen:\n"
+DEFAULT_NUDGE_TASK = (
+    "Jatka teht\u00e4v\u00e4\u00e4 siit\u00e4 mihin j\u00e4it.\n\n"
+    "Tarkista ensin nykyinen tila ja jatka itse teht\u00e4v\u00e4n suorittamista "
+    "ilman turhaa selittely\u00e4.\n\n"
+    "Jos teht\u00e4v\u00e4 on t\u00e4ysin valmis, vastaa t\u00e4sm\u00e4lleen:\n"
     "DONE\n\n"
-    "Jos tehtävä ei ole vielä valmis, jatka työskentelyä ja vie tehtävä "
-    "mahdollisimman pitkälle."
+    "Jos teht\u00e4v\u00e4 ei ole viel\u00e4 valmis, jatka ty\u00f6skentely\u00e4 ja vie teht\u00e4v\u00e4 "
+    "mahdollisimman pitk\u00e4lle."
 )
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="OpenHands conversation keepalive"
-    )
-
-    parser.add_argument(
-        "--conversation-id",
-        action="append",
-        default=None,
-        help="Conversation UUID (toistettavissa, tai "
-        "OPENHANDS_CONVERSATION_IDS pilkulla eroteltuna)",
-    )
-
-    parser.add_argument(
-        "--base-url",
-        default=os.getenv(
-            "OPENHANDS_BASE_URL",
-            "https://app.all-hands.dev",
-        ),
-        help="OpenHands base URL",
-    )
-
-    parser.add_argument(
-        "--nudge",
-        default=os.getenv("OPENHANDS_NUDGE", DEFAULT_NUDGE),
-        help="Viesti pysähtyneelle agentille",
-    )
-
-    parser.add_argument(
-        "--interval",
-        type=int,
-        default=int(os.getenv("OPENHANDS_POLL_INTERVAL", "120")),
-        help="Pollausväli sekunteina jatkuvassa vahdissa (default 120)",
-    )
-
-    parser.add_argument(
-        "--idle-timeout",
-        type=int,
-        default=int(os.getenv("OPENHANDS_IDLE_TIMEOUT", "1200")),
-        help="Idle-aika ennen nudgea sekunteina (default 1200 = 20 min)",
-    )
-
-    parser.add_argument(
-        "--resume-cooldown",
-        type=int,
-        default=int(os.getenv("OPENHANDS_RESUME_COOLDOWN", "900")),
-        help="Kuinka usein PAUSED-resumea saa yrittää uudelleen",
-    )
-
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=os.getenv("OPENHANDS_DRY_RUN", "").lower()
-        in ("1", "true", "yes", "on"),
-        help="Älä lähetä nudgeja/resumeja, vain logittaa",
-    )
-
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Tarkista jokainen conversation kerran ja lopeta "
-        "(GitHub Actions -moodi)",
-    )
-
-    parser.add_argument(
-        "--no-done-check",
-        action="store_true",
-        default=os.getenv("OPENHANDS_NO_DONE_CHECK", "").lower()
-        in ("1", "true", "yes", "on"),
-        help="Älä tarkista DONE-viestiä ennen nudgea "
-        "(hätäkatkaisin, jos event-haku oireilee)",
-    )
-
-    return parser.parse_args()
+    parser = argparse.ArgumentParser(description="OpenHands conversation keepalive")
+    parser.add_argument("--conversation-id", action="append", default=None)
+    parser.add_argument("--base-url", default=os.getenv("OPENHANDS_BASE_URL", "https://app.all-hands.dev"))
+    mode = os.getenv("OPENHANDS_NUDGE_MODE", "loop").lower()
+    if mode not in ("loop", "task"):
+        mode = "loop"
+    parser.add_argument("--nudge-mode", choices=("loop", "task"), default=mode)
+    parser.add_argument("--nudge", default=None)
+    parser.add_argument("--interval", type=int, default=int(os.getenv("OPENHANDS_POLL_INTERVAL", "120")))
+    parser.add_argument("--idle-timeout", type=int, default=int(os.getenv("OPENHANDS_IDLE_TIMEOUT", "900")))
+    parser.add_argument("--resume-cooldown", type=int, default=int(os.getenv("OPENHANDS_RESUME_COOLDOWN", "900")))
+    parser.add_argument("--dry-run", action="store_true", default=_env_bool("OPENHANDS_DRY_RUN"))
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--discover", action="store_true", default=_env_bool("OPENHANDS_AUTO_DISCOVER"))
+    parser.add_argument("--discover-limit", type=int, default=int(os.getenv("OPENHANDS_DISCOVER_LIMIT", "50")))
+    parser.add_argument("--no-done-check", action="store_true", default=_env_bool("OPENHANDS_NO_DONE_CHECK"))
+    args = parser.parse_args()
+    if args.nudge is None:
+        args.nudge = DEFAULT_NUDGE_LOOP if args.nudge_mode == "loop" else DEFAULT_NUDGE_TASK
+    env_nudge = os.getenv("OPENHANDS_NUDGE", "").strip()
+    if env_nudge:
+        args.nudge = env_nudge
+    return args
 
 
 def resolve_conversation_ids(args):
-    """Kerää ID:t lipuista + env-muuttujista, duplikaatit pois."""
     ids = []
     if args.conversation_id:
         ids.extend(args.conversation_id)
-    plural = os.getenv("OPENHANDS_CONVERSATION_IDS", "")
-    if plural:
-        ids.extend(plural.split(","))
-    singular = os.getenv("OPENHANDS_CONVERSATION_ID", "")
+    for raw in os.getenv("OPENHANDS_CONVERSATION_IDS", "").split(","):
+        if raw.strip():
+            ids.append(raw.strip())
+    singular = os.getenv("OPENHANDS_CONVERSATION_ID", "").strip()
     if singular:
         ids.append(singular)
-    seen = set()
-    unique = []
-    for raw in ids:
-        cleaned = raw.strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            unique.append(cleaned)
+    seen, unique = set(), []
+    for x in ids:
+        if x and x not in seen:
+            seen.add(x)
+            unique.append(x)
     return unique
 
 
+def resolve_skip_ids():
+    return {p.strip() for p in os.getenv("OPENHANDS_SKIP_IDS", "").split(",") if p.strip()}
+
+
 def parse_updated_at(value: str) -> float:
-    """Muuntaa ISO8601 timestampin Unix-timeksi."""
     if not value:
         return 0.0
-
     try:
-        dt = datetime.datetime.fromisoformat(
-            value.replace("Z", "+00:00")
-        )
-        return dt.timestamp()
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except Exception:
         return 0.0
 
 
 def get_conversation(base_url, headers, conversation_id):
-    response = requests.get(
-        f"{base_url}/api/v1/app-conversations",
-        headers=headers,
-        params={"ids": conversation_id},
-        timeout=30,
-    )
-
-    response.raise_for_status()
-
-    items = response.json()
-
+    r = requests.get(f"{base_url}/api/v1/app-conversations", headers=headers, params={"ids": conversation_id}, timeout=30)
+    r.raise_for_status()
+    items = r.json()
     if not items or not items[0]:
         raise RuntimeError("Conversation not found")
-
     return items[0]
 
 
-def _event_text(event):
-    """Poimi viestin teksti MessageEvent-muodoista puolustautuen.
-
-    Palauttaa tekstin tai tyhjän merkkijonon, ei koskaan heitä.
-    """
+def discover_conversation_ids(base_url, headers, limit=50):
+    # TODO: paginate with next_page_id when discovery is enabled broadly.
+    # This PR intentionally keeps discovery single-page; explicit secret IDs
+    # remain the authoritative scope for normal use.
     try:
-        if not isinstance(event, dict):
-            return ""
-        for key in ("llm_message", "message", "content", "text"):
-            value = event.get(key)
-            text = _coerce_text(value)
-            if text:
-                return text
-        return ""
-    except Exception:
-        return ""
+        r = requests.get(f"{base_url}/api/v1/app-conversations/search", headers=headers, params={"limit": limit}, timeout=45)
+        r.raise_for_status()
+        payload = r.json()
+        items = payload.get("items") or payload.get("results") or ([] if not isinstance(payload, list) else payload)
+        # Discovery scope (documentation only; not enforced yet):
+        # keep normal operation on explicit OPENHANDS_CONVERSATION_IDS.
+        # Future discovery should be allowlisted to approved repositories only.
+        # Current planned scope: akukuusisto/automation, akukuusisto/tradefoundry,
+        # akukuusisto/accounter, akukuusisto/ridekernel-explore, akukuusisto/atlas.
+        active = {"RUNNING", "PAUSED"}
+        found, seen = [], set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            cid = (item.get("id") or "").strip()
+            if cid and cid not in seen and item.get("sandbox_status") in active:
+                seen.add(cid)
+                found.append(cid)
+        print(f"  discover: {len(found)} aktiivista")
+        return found
+    except Exception as exc:
+        print(f"  discover ep\u00e4onnistui: {exc}")
+        return []
 
 
 def _coerce_text(value):
-    """Muunna merkkijono / content-lista / dict tekstiksi."""
     try:
         if value is None:
             return ""
         if isinstance(value, str):
             return value
         if isinstance(value, list):
-            parts = [_coerce_text(item) for item in value]
-            return "".join(p for p in parts if p)
+            return "".join(_coerce_text(i) for i in value if _coerce_text(i))
         if isinstance(value, dict):
-            # OpenAI-tyyli: {"type": "text", "text": "..."}
-            # tai {"role": ..., "content": ...}
             if isinstance(value.get("text"), str):
                 return value["text"]
             if "content" in value:
                 return _coerce_text(value["content"])
+        return ""
+    except Exception:
+        return ""
+
+
+def _event_text(event):
+    try:
+        if not isinstance(event, dict):
             return ""
+        for key in ("llm_message", "message", "content", "text"):
+            t = _coerce_text(event.get(key))
+            if t:
+                return t
         return ""
     except Exception:
         return ""
 
 
 def _event_timestamp(event):
-    """Eventin timestamp Unix-timena (0.0 jos puuttuu/virheellinen)."""
     try:
-        if isinstance(event, dict):
-            return parse_updated_at(event.get("timestamp", ""))
-        return 0.0
+        return parse_updated_at(event.get("timestamp", "")) if isinstance(event, dict) else 0.0
     except Exception:
         return 0.0
 
 
-def is_done(events):
-    """Onko uusin viesti kokonaisuudessaan agentin täsmällinen DONE?
-
-    Sääntö: uusin viesti overall ratkaisee. Jos agentti vastasi DONE
-    mutta käyttäjä puhui sen jälkeen, kyseessä on uusi tehtävä eikä
-    DONEa huomioida. Täsmää vain tasan "DONE" (whitespace + case
-    sallitaan), jotta "DONE!" tai lauseen sisäinen maininta ei
-    pysäytä valvontaa vahingossa.
-    """
+def is_stop_message(events, nudge_mode: str) -> bool:
     try:
-        if not events:
-            return False
-        messages = [
-            e for e in events
-            if isinstance(e, dict)
-            and e.get("source") in ("agent", "user")
-            and _event_text(e).strip()
-        ]
+        messages = [e for e in (events or []) if isinstance(e, dict) and e.get("source") in ("agent", "user") and _event_text(e).strip()]
         if not messages:
             return False
-        # Uusin ensin: timestampilla jos saatavilla, muuten listajärjestys.
         if any(_event_timestamp(e) > 0 for e in messages):
             messages.sort(key=_event_timestamp, reverse=True)
         else:
@@ -289,549 +202,259 @@ def is_done(events):
         latest = messages[0]
         if latest.get("source") != "agent":
             return False
-        return _event_text(latest).strip().upper() == "DONE"
+        text = _event_text(latest).strip().upper()
+        return text == "LOOP-STOP" if nudge_mode == "loop" else text == "DONE"
     except Exception:
         return False
 
 
-def fetch_recent_messages(base_url, headers, conversation_id, limit=20):
-    """Hae tuoreimmat MessageEventit. Palauttaa listan tai None.
-
-    None = haku epäonnistui -> kutsujan kuuluu jatkaa vanhalla
-    logiikalla (fail-open), ei koskaan pysäyttää valvontaa.
-    """
+def fetch_recent_events(base_url, headers, conversation_id, limit=20):
     try:
-        response = requests.get(
-            f"{base_url}/api/v1/conversation/"
-            f"{conversation_id}/events/search",
+        r = requests.get(
+            f"{base_url}/api/v1/conversation/{conversation_id}/events/search",
             headers=headers,
-            params={"kind__eq": "MessageEvent", "limit": limit},
+            params={"limit": limit, "sort_order": "TIMESTAMP_DESC"},
             timeout=30,
         )
-        response.raise_for_status()
-        payload = response.json()
+        r.raise_for_status()
+        payload = r.json()
         if isinstance(payload, dict):
             for key in ("items", "results", "events"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return value
+                if isinstance(payload.get(key), list):
+                    return payload[key]
             return []
-        if isinstance(payload, list):
-            return payload
-        return []
+        return payload if isinstance(payload, list) else []
     except Exception as exc:
-        print(f"  DONE-tarkistus epäonnistui: {exc} -> jatketaan normaalisti.")
+        print(f"  event-haku ep\u00e4onnistui: {exc}")
         return None
+
+
+def latest_activity_ts(base_url, headers, conversation_id, updated_ts: float):
+    events = fetch_recent_events(base_url, headers, conversation_id, limit=10)
+    if events is None:
+        return updated_ts
+    best = updated_ts or 0.0
+    for event in events:
+        ts = _event_timestamp(event)
+        if ts > best:
+            best = ts
+    return best
 
 
 def try_resume(base_url, headers, sandbox_id, dry_run):
     if not sandbox_id:
         print("  resume: sandbox_id puuttuu")
         return False
-
     if dry_run:
-        print("  DRY-RUN: resumea ei lähetetty")
+        print("  DRY-RUN: resumea ei l\u00e4hetetty")
         return True
-
     try:
-        response = requests.post(
-            f"{base_url}/api/v1/sandboxes/{sandbox_id}/resume",
-            headers=headers,
-            timeout=30,
-        )
-
-        print(
-            f"  resume -> {response.status_code} "
-            f"{response.text[:200]}"
-        )
-
-        return response.status_code < 300
-
+        r = requests.post(f"{base_url}/api/v1/sandboxes/{sandbox_id}/resume", headers=headers, timeout=30)
+        print(f"  resume -> {r.status_code} {r.text[:200]}")
+        return r.status_code < 300
     except Exception as exc:
-        print(f"  resume epäonnistui: {exc}")
+        print(f"  resume ep\u00e4onnistui: {exc}")
         return False
 
 
-def send_nudge(base_url, headers, conversation_id, text, dry_run):
+def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=None):
     if dry_run:
-        print("  DRY-RUN: nudgea ei lähetetty")
+        print("  DRY-RUN: nudgea ei l\u00e4hetetty")
         return True
-
-    response = requests.post(
-        f"{base_url}/api/v1/app-conversations/"
-        f"{conversation_id}/send-message",
-        headers=headers,
-        timeout=30,
-        json={
-            "role": "user",
-            "run": True,
-            "content": [
-                {
-                    "type": "text",
-                    "text": text,
-                }
-            ],
-        },
-    )
-
-    if response.status_code in (409, 410, 503):
-        print(
-            f"  send-message hylätty "
-            f"{response.status_code}: "
-            f"{response.text[:300]}"
+    payload = {"role": "user", "run": True, "content": [{"type": "text", "text": text}]}
+    try:
+        r = requests.post(
+            f"{base_url}/api/v1/app-conversations/{conversation_id}/send-message",
+            headers=headers, timeout=30, json=payload,
         )
+        if r.status_code < 300:
+            print(f"  send-message OK: {r.text[:200]}")
+            return True
+        print(f"  send-message -> {r.status_code}: {r.text[:200]}")
+        if r.status_code in (409, 410):
+            return False
+    except Exception as exc:
+        print(f"  send-message virhe: {exc}")
+    conv = conversation or {}
+    conv_url = (conv.get("conversation_url") or "").rstrip("/")
+    session_key = conv.get("session_api_key") or ""
+    if not conv_url or not session_key:
+        print("  fallback: conversation_url/session_api_key puuttuu")
         return False
-
-    response.raise_for_status()
-
-    print(
-        f"  send-message OK: "
-        f"{response.text[:300]}"
-    )
-
-    return True
+    try:
+        rh = {"X-Session-API-Key": session_key, "Content-Type": "application/json"}
+        r = requests.post(f"{conv_url}/events", headers=rh, timeout=30, json=payload)
+        if r.status_code < 300:
+            print(f"  runtime events OK: {r.text[:200]}")
+            try:
+                rr = requests.post(f"{conv_url}/run", headers=rh, timeout=15)
+                print(f"  runtime run -> {rr.status_code}")
+            except Exception:
+                pass
+            return True
+        print(f"  runtime events -> {r.status_code}: {r.text[:200]}")
+        return False
+    except Exception as exc:
+        print(f"  runtime fallback virhe: {exc}")
+        return False
 
 
 def check_conversation(base_url, headers, conv_id, args, state):
-    """Yksi tarkistus yhdelle conversatiolle.
-
-    Palauttaa outcome-merkkijonon yhteenvedolle. Päivittää
-    state-sanakirjoja (nudges, last_resume per conversation).
-    """
     dry_run = args.dry_run
     nudges = state["nudges"].get(conv_id, 0)
-
     try:
-        conversation = get_conversation(
-            base_url,
-            headers,
-            conv_id,
-        )
-
+        conversation = get_conversation(base_url, headers, conv_id)
         sandbox_status = conversation.get("sandbox_status")
         execution_status = conversation.get("execution_status")
         updated_at = conversation.get("updated_at", "")
         title = conversation.get("title", "")
         sandbox_id = conversation.get("sandbox_id", "")
-
         now = time.time()
         updated_ts = parse_updated_at(updated_at)
+        activity_ts = updated_ts
+        if execution_status != "running" and sandbox_status in ("RUNNING", "PAUSED", "ERROR"):
+            activity_ts = latest_activity_ts(base_url, headers, conv_id, updated_ts)
+        idle_for = max(0, int(now - activity_ts)) if activity_ts else None
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        idle_text = f"{idle_for}s idle" if idle_for is not None else "idle unknown"
+        print(f"[{ts}] [{conv_id[:8]}] sandbox={sandbox_status} exec={execution_status} {idle_text} title={title!r}")
 
-        if updated_ts:
-            idle_for = max(0, int(now - updated_ts))
-        else:
-            idle_for = None
-
-        timestamp = datetime.datetime.now().isoformat(
-            timespec="seconds"
-        )
-
-        if idle_for is not None:
-            idle_text = f"{idle_for}s idle"
-        else:
-            idle_text = "idle unknown"
-
-        print(
-            f"[{timestamp}] [{conv_id[:8]}] "
-            f"sandbox={sandbox_status} "
-            f"exec={execution_status} "
-            f"{idle_text} "
-            f"title={title!r}"
-        )
-
-        # --------------------------------------------------
-        # Sandbox MISSING -> terminaalitila, eläköi
-        # --------------------------------------------------
         if sandbox_status == "MISSING":
-            # Tarkista DONE ennen eläköintiä
             if not args.no_done_check:
-                recent = fetch_recent_messages(
-                    base_url, headers, conv_id
-                )
-                if recent is not None and is_done(recent):
-                    print(
-                        "  Sandbox MISSING: "
-                        "tehtävä valmis (DONE), valvonta lopetetaan."
-                    )
+                recent = fetch_recent_events(base_url, headers, conv_id)
+                if recent is not None and is_stop_message(recent, args.nudge_mode):
                     return "done"
-
-            print(
-                "  Sandbox MISSING: "
-                "poistettu, valvonta lopetetaan."
-            )
             return "retire-sandbox"
 
-        # --------------------------------------------------
-        # Sandbox ERROR -> yritä nudgea jos liian kauan idle
-        # --------------------------------------------------
         if sandbox_status == "ERROR":
-            # Tarkista DONE ensin
-            if not args.no_done_check:
-                recent = fetch_recent_messages(
-                    base_url, headers, conv_id
-                )
-                if recent is not None and is_done(recent):
-                    print(
-                        "  Sandbox ERROR: "
-                        "tehtävä valmis (DONE), valvonta lopetetaan."
-                    )
-                    return "done"
+            # ERROR is terminal/read-only in the V1 API: no new messages.
+            return "terminal-error"
 
-            # Jos idle timeout ylitetty, yritä nudgea
-            if idle_for is not None and idle_for >= args.idle_timeout:
-                next_nudge = nudges + 1
-                print(
-                    f"  ERROR ja {idle_for}s idle -> "
-                    f"nudge {next_nudge}"
-                )
-
-                if send_nudge(
-                    base_url,
-                    headers,
-                    conv_id,
-                    args.nudge,
-                    dry_run,
-                ):
-                    state["nudges"][conv_id] = next_nudge
-                    print(
-                        "  Nudge lähetetty -> "
-                        "odotetaan seuraavaa pollia."
-                        if not dry_run
-                        else "  (dry-run, ei lasketa)"
-                    )
-                    return "dry-nudge" if dry_run else "nudged"
-
-                print(
-                    "  Nudge ei mennyt läpi -> "
-                    "yritetään myöhemmin uudelleen."
-                )
-                return "nudge-failed"
-
-            print(
-                f"  Sandbox ERROR: "
-                f"odotetaan idle timeoutia ({idle_for}s / {args.idle_timeout}s)."
-            )
-            return "error-wait"
-
-        # --------------------------------------------------
-        # Sandbox PAUSED -> resume (cooldownilla) + nudge jos liian kauan idle
-        # --------------------------------------------------
         if sandbox_status == "PAUSED":
             last_resume = state["last_resume"].get(conv_id, 0.0)
             if now - last_resume >= args.resume_cooldown:
-                print(
-                    "  Sandbox PAUSED -> yritetään resumea..."
-                )
-                try_resume(
-                    base_url,
-                    headers,
-                    sandbox_id,
-                    dry_run,
-                )
+                print("  Sandbox PAUSED -> resume...")
+                try_resume(base_url, headers, sandbox_id, dry_run)
                 state["last_resume"][conv_id] = now
-            else:
-                remaining = int(
-                    args.resume_cooldown - (now - last_resume)
-                )
-                print(
-                    f"  Sandbox PAUSED -> "
-                    f"resume cooldown, {remaining}s jäljellä."
-                )
-
-            # Tarkista onko conversation ollut liian kauan idle PAUSED-tilassa
-            # Jos on, lähetä nudge vaikka resume on cooldownissa
             if idle_for is not None and idle_for >= args.idle_timeout:
-                # DONE-tarkistus myös PAUSED-tilassa
                 if not args.no_done_check:
-                    recent = fetch_recent_messages(
-                        base_url, headers, conv_id
-                    )
-                    if recent is not None and is_done(recent):
-                        print(
-                            "  Uusin viesti on agentin DONE -> "
-                            "tehtävä valmis, ei tönäistä."
-                        )
+                    recent = fetch_recent_events(base_url, headers, conv_id)
+                    if recent is not None and is_stop_message(recent, args.nudge_mode):
                         return "done"
-
-                next_nudge = nudges + 1
-                print(
-                    f"  PAUSED ja {idle_for}s idle -> "
-                    f"nudge {next_nudge}"
-                )
-
-                if send_nudge(
-                    base_url,
-                    headers,
-                    conv_id,
-                    args.nudge,
-                    dry_run,
-                ):
-                    state["nudges"][conv_id] = next_nudge
-                    print(
-                        "  Nudge lähetetty -> "
-                        "odotetaan seuraavaa pollia."
-                        if not dry_run
-                        else "  (dry-run, ei lasketa)"
-                    )
+                if send_nudge(base_url, headers, conv_id, args.nudge, dry_run, conversation):
+                    state["nudges"][conv_id] = nudges + 1
                     return "dry-nudge" if dry_run else "nudged"
-
-                print(
-                    "  Nudge ei mennyt läpi -> "
-                    "yritetään myöhemmin uudelleen."
-                )
                 return "nudge-failed"
-
             return "paused"
 
-        # --------------------------------------------------
-        # Sandbox ei valmis -> ei tönäistä (execution_status on
-        # None kun sandbox ei ole RUNNING, joten arvaaminen
-        # johtaisi vain hylättyihin send-message-kutsuihin).
-        # --------------------------------------------------
         if sandbox_status == "STARTING":
-            print(
-                "  Sandbox STARTING -> odotetaan "
-                "käynnistymistä, ei tönäistä."
-            )
             return "starting"
-
         if sandbox_status != "RUNNING":
-            print(
-                f"  Sandbox {sandbox_status} ei RUNNING -> "
-                "ei tönäistä, odotetaan."
-            )
             return "not-running"
-
-        # --------------------------------------------------
-        # Running
-        # --------------------------------------------------
         if execution_status == "running":
-            print("  Agentti on running -> ei tehdä mitään.")
             return "running"
-
-        # --------------------------------------------------
-        # Human confirmation required
-        # --------------------------------------------------
         if execution_status == "waiting_for_confirmation":
-            print(
-                "  VAATII VAHVISTUKSEN UI:ssa -> "
-                "ei lähetetä automaattista nudgea."
-            )
             return "confirmation"
 
-        # --------------------------------------------------
-        # Potentially stalled
-        # --------------------------------------------------
-        if execution_status in (
-            "finished",
-            "idle",
-            "stuck",
-            "error",
-            None,
-        ):
+        if execution_status in ("finished", "idle", "stuck", "error", None):
             if idle_for is None:
-                print(
-                    "  updated_at puuttuu / ei voitu tulkita -> "
-                    "odotetaan."
-                )
                 return "idle-unknown"
-
             if idle_for < args.idle_timeout:
-                print(
-                    f"  Ei vielä tarpeeksi idle: "
-                    f"{idle_for}s / {args.idle_timeout}s."
-                )
+                print(f"  Ei viel\u00e4 idle: {idle_for}s / {args.idle_timeout}s")
                 return "idle-wait"
-
-            # --------------------------------------------------
-            # DONE-tarkistus: vain kun nudge olisi muuten lähdössä,
-            # jotta event-haku ei kuormita joka pollia. Fail-open:
-            # epäonnistunut haku ei estä nudgea.
-            # --------------------------------------------------
             if not args.no_done_check:
-                recent = fetch_recent_messages(
-                    base_url, headers, conv_id
-                )
-                if recent is not None and is_done(recent):
-                    print(
-                        "  Uusin viesti on agentin DONE -> "
-                        "tehtävä valmis, ei tönäistä."
-                    )
+                recent = fetch_recent_events(base_url, headers, conv_id)
+                if recent is not None and is_stop_message(recent, args.nudge_mode):
                     return "done"
-
-            next_nudge = nudges + 1
-            print(
-                f"  Agentti pysähtynyt "
-                f"({execution_status}), "
-                f"{idle_for}s idle -> "
-                f"nudge {next_nudge}"
-            )
-
-            if send_nudge(
-                base_url,
-                headers,
-                conv_id,
-                args.nudge,
-                dry_run,
-            ):
-                state["nudges"][conv_id] = next_nudge
-                print(
-                    "  Nudge lähetetty -> "
-                    "odotetaan seuraavaa pollia."
-                    if not dry_run
-                    else "  (dry-run, ei lasketa)"
-                )
+            print(f"  Pys\u00e4htynyt ({execution_status}), {idle_for}s idle -> nudge")
+            if send_nudge(base_url, headers, conv_id, args.nudge, dry_run, conversation):
+                state["nudges"][conv_id] = nudges + 1
                 return "dry-nudge" if dry_run else "nudged"
-
-            print(
-                "  Nudge ei mennyt läpi -> "
-                "yritetään myöhemmin uudelleen."
-            )
             return "nudge-failed"
-
-        print(
-            f"  Tuntematon execution_status="
-            f"{execution_status!r} -> odotetaan."
-        )
         return "unknown"
-
     except requests.HTTPError as exc:
-        response_text = ""
-        if exc.response is not None:
-            response_text = exc.response.text[:300]
-        print(
-            f"  HTTP-virhe: {exc}"
-            + (f" | {response_text}" if response_text else "")
-        )
+        print(f"  HTTP-virhe: {exc}")
         return "http-error"
-
     except requests.RequestException as exc:
         print(f"  Network-virhe: {exc}")
         return "net-error"
-
     except Exception as exc:
         print(f"  Virhe: {exc}")
         return "error"
 
 
 def write_step_summary(results):
-    """Kirjoita Actions-yhteenveto jos GITHUB_STEP_SUMMARY on asetettu."""
     path = os.getenv("GITHUB_STEP_SUMMARY", "")
     if not path:
         return
     try:
+        lines = ["### OpenHands keepalive", "", "| Conversation | Outcome |", "|---|---|"]
+        for cid, outcome in results:
+            lines.append(f"| `{cid[:8]}` | `{outcome}` |")
+        counts = {}
+        for _, o in results:
+            counts[o] = counts.get(o, 0) + 1
+        lines.append("")
+        lines.append("Summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
         with open(path, "a", encoding="utf-8") as fh:
-            fh.write("## OpenHands keepalive\n\n")
-            fh.write("| Conversation | Tulos |\n")
-            fh.write("|---|---|\n")
-            for conv_id, outcome in results:
-                fh.write(f"| `{conv_id[:8]}` | {outcome} |\n")
+            fh.write("\n".join(lines) + "\n")
     except Exception as exc:
-        print(f"  Step summary epäonnistui: {exc}")
+        print(f"  step summary ep\u00e4onnistui: {exc}")
 
 
 def main():
     args = parse_args()
-
-    api_key = os.getenv("OPENHANDS_API_KEY", "")
+    api_key = os.getenv("OPENHANDS_API_KEY", "").strip()
     if not api_key:
-        print(
-            "OPENHANDS_API_KEY puuttuu.\n"
-            "Luo API key OpenHands Cloudin asetuksista.",
-            file=sys.stderr,
-        )
+        print("OPENHANDS_API_KEY puuttuu", file=sys.stderr)
         sys.exit(2)
-
-    conv_ids = resolve_conversation_ids(args)
-    if not conv_ids:
-        print(
-            "--conversation-id puuttuu "
-            "(tai OPENHANDS_CONVERSATION_ID / "
-            "OPENHANDS_CONVERSATION_IDS)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    if not args.once and args.interval <= 0:
-        print("--interval pitää olla > 0", file=sys.stderr)
-        sys.exit(2)
-
     if args.idle_timeout <= 0:
-        print("--idle-timeout pitää olla > 0", file=sys.stderr)
+        print("--idle-timeout pit\u00e4\u00e4 olla > 0", file=sys.stderr)
         sys.exit(2)
-
     base_url = args.base_url.rstrip("/")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     state = {"nudges": {}, "last_resume": {}}
-
+    conv_ids = resolve_conversation_ids(args)
+    skip_ids = resolve_skip_ids()
+    if args.discover:
+        for cid in discover_conversation_ids(base_url, headers, limit=args.discover_limit):
+            if cid not in conv_ids:
+                conv_ids.append(cid)
+    if skip_ids:
+        conv_ids = [c for c in conv_ids if c not in skip_ids]
+    if not conv_ids:
+        print("Ei conversation-ID:it\u00e4. Aseta lista tai --discover.", file=sys.stderr)
+        sys.exit(2)
     print("--- OpenHands keepalive ---")
+    print(f"nudge-mode: {args.nudge_mode}")
+    print(f"discover: {bool(args.discover)}")
     print(f"conversations: {len(conv_ids)}")
     for cid in conv_ids:
         print(f"  - {cid}")
-    if not args.once:
-        print(
-            f"poll interval: {args.interval}s "
-            f"({args.interval / 60:.1f} min)"
-        )
-    print(
-        f"idle timeout: {args.idle_timeout}s "
-        f"({args.idle_timeout / 60:.1f} min)"
-    )
+    print(f"idle timeout: {args.idle_timeout}s")
     if args.dry_run:
-        print("DRY-RUN: ei lähetetä nudgeja/resumeja")
+        print("DRY-RUN")
     print()
-
-    # --------------------------------------------------
-    # Kertatarkistus (GitHub Actions)
-    # --------------------------------------------------
     if args.once:
         results = []
-        for cid in conv_ids:
-            try:
-                outcome = check_conversation(
-                    base_url, headers, cid, args, state
-                )
-            except KeyboardInterrupt:
-                print("\nLopetetaan käyttäjän pyynnöstä.")
-                break
-            results.append((cid, outcome))
-        print()
+        for i, cid in enumerate(conv_ids):
+            if i:
+                time.sleep(0.5)
+            results.append((cid, check_conversation(base_url, headers, cid, args, state)))
         print("--- Yhteenveto ---")
         for cid, outcome in results:
             print(f"  {cid[:8]}: {outcome}")
         write_step_summary(results)
         return
-
-    # --------------------------------------------------
-    # Jatkuva vahti (kotikone / palvelin)
-    # --------------------------------------------------
     active = list(conv_ids)
     while active:
         for cid in list(active):
-            try:
-                outcome = check_conversation(
-                    base_url, headers, cid, args, state
-                )
-            except KeyboardInterrupt:
-                print("\nLopetetaan käyttäjän pyynnöstä.")
-                return
-            if outcome in ("retire-sandbox", "done"):
+            outcome = check_conversation(base_url, headers, cid, args, state)
+            if outcome in ("retire-sandbox", "terminal-error", "done"):
                 active.remove(cid)
         if not active:
-            print("Kaikki conversationit eläköity -> lopetetaan.")
             break
-        print(
-            f"  Seuraava kierros "
-            f"{args.interval}s kuluttua..."
-        )
-        try:
-            time.sleep(args.interval)
-        except KeyboardInterrupt:
-            print("\nLopetetaan käyttäjän pyynnöstä.")
-            break
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":
