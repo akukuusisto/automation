@@ -24,12 +24,14 @@ DEFAULT_NUDGE_LOOP = (
     "Jatka autonomista looppia ty\u00f6nkulkusi mukaan.\n\n"
     "1) Tarkista nykyinen tila (git, avoimet ty\u00f6t, roadmap).\n"
     "2) Jatka kesken olevaa ty\u00f6t\u00e4 ilman turhaa selittely\u00e4.\n"
-    "3) Jos nykyiset teht\u00e4v\u00e4t loppuvat: ota lis\u00e4\u00e4 t\u00f6it\u00e4 roadmapilta "
+    "3) Ennen uuden ty\u00f6n aloittamista tarkista git, avoimet PR:t ja issue-ty\u00f6 "
+    "sek\u00e4 varmista, ettei toinen agentti tee samaa ty\u00f6t\u00e4. V\u00e4lt\u00e4 duplikaatit.\n"
+    "4) Jos nykyiset teht\u00e4v\u00e4t loppuvat: ota lis\u00e4\u00e4 t\u00f6it\u00e4 roadmapilta "
     "tai avoimista issueista (kun s\u00e4\u00e4nn\u00f6t sen sallivat).\n"
-    "4) Jos roadmapkin on tyhj\u00e4: tutki mit\u00e4 sovelluksesta puuttuu "
+    "5) Jos roadmapkin on tyhj\u00e4: tutki mit\u00e4 sovelluksesta puuttuu "
     "isommana kokonaisuutena, lis\u00e4\u00e4 suosituksesi roadmapille ja "
     "ota se ty\u00f6st\u00f6\u00f6n.\n"
-    "5) Pushaa muutokset normaalilla kadenssilla. \u00c4l\u00e4 mergaa "
+    "6) Pushaa muutokset normaalilla kadenssilla. \u00c4l\u00e4 mergaa "
     "suojattuihin haaroihin ilman erillist\u00e4 ohjetta.\n\n"
     "\u00c4l\u00e4 vastaa pelk\u00e4ll\u00e4 DONE. Jos looppi on tietoisesti lopetettava, "
     "vastaa t\u00e4sm\u00e4lleen:\n"
@@ -121,12 +123,20 @@ def get_conversation(base_url, headers, conversation_id):
 
 
 def discover_conversation_ids(base_url, headers, limit=50):
+    # TODO: paginate with next_page_id when discovery is enabled broadly.
+    # This PR intentionally keeps discovery single-page; explicit secret IDs
+    # remain the authoritative scope for normal use.
     try:
         r = requests.get(f"{base_url}/api/v1/app-conversations/search", headers=headers, params={"limit": limit}, timeout=45)
         r.raise_for_status()
         payload = r.json()
         items = payload.get("items") or payload.get("results") or ([] if not isinstance(payload, list) else payload)
-        active = {"RUNNING", "PAUSED", "ERROR"}
+        # Discovery scope (documentation only; not enforced yet):
+        # keep normal operation on explicit OPENHANDS_CONVERSATION_IDS.
+        # Future discovery should be allowlisted to approved repositories only.
+        # Current planned scope: akukuusisto/automation, akukuusisto/tradefoundry,
+        # akukuusisto/accounter, akukuusisto/ridekernel-explore, akukuusisto/atlas.
+        active = {"RUNNING", "PAUSED"}
         found, seen = [], set()
         for item in items:
             if not isinstance(item, dict):
@@ -317,16 +327,8 @@ def check_conversation(base_url, headers, conv_id, args, state):
             return "retire-sandbox"
 
         if sandbox_status == "ERROR":
-            if not args.no_done_check:
-                recent = fetch_recent_events(base_url, headers, conv_id)
-                if recent is not None and is_stop_message(recent, args.nudge_mode):
-                    return "done"
-            if idle_for is not None and idle_for >= args.idle_timeout:
-                if send_nudge(base_url, headers, conv_id, args.nudge, dry_run, conversation):
-                    state["nudges"][conv_id] = nudges + 1
-                    return "dry-nudge" if dry_run else "nudged"
-                return "nudge-failed"
-            return "error-wait"
+            # ERROR is terminal/read-only in the V1 API: no new messages.
+            return "terminal-error"
 
         if sandbox_status == "PAUSED":
             last_resume = state["last_resume"].get(conv_id, 0.0)
