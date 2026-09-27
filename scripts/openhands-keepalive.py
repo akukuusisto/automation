@@ -450,7 +450,7 @@ def main():
     while active:
         for cid in list(active):
             outcome = check_conversation(base_url, headers, cid, args, state)
-            if outcome in ("retire-sandbox", "done"):
+            if outcome in ("retire-sandbox", "terminal-error", "done"):
                 active.remove(cid)
         if not active:
             break
