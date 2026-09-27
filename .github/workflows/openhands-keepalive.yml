@@ -47,7 +47,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: main
           persist-credentials: false
       - name: Run keepalive check (once)
         shell: bash
