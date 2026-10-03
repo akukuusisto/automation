@@ -49,6 +49,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Validate keepalive script
+        run: python3 -m py_compile scripts/openhands-keepalive.py
       - name: Run keepalive check (once)
         shell: bash
         env:
