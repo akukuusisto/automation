@@ -1,8 +1,8 @@
 name: openhands-keepalive
 
 # Keeps OpenHands agents alive and automatically starts a replacement agent
-# when a conversation reaches a terminal state (finished/error/stuck or
-# sandbox ERROR/MISSING). Active conversations are discovered from OpenHands
+# when a sandbox is actually lost (sandbox MISSING). Recoverable execution
+# errors and sandbox ERROR states stay on the original conversation.
 # so replacement conversation IDs do not need to be written back to secrets.
 #
 # Secrets (Settings -> Secrets and variables -> Actions):
@@ -62,8 +62,8 @@ jobs:
           OPENHANDS_IDLE_TIMEOUT: "900"
           OPENHANDS_RESUME_COOLDOWN: "900"
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
-          # Always discover active conversations so newly started replacement
-          # conversations are picked up without mutating the conversation-ID secret.
+          # Discover recoverable conversations so replacement IDs are picked up without
+          # mutating the conversation-ID secret.
           OPENHANDS_AUTO_DISCOVER: "true"
         run: |
           python3 -c "import requests" 2>/dev/null || pip install --quiet requests
