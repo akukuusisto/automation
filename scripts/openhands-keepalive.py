@@ -424,12 +424,8 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 recent = fetch_recent_events(base_url, headers, conv_id)
                 if recent is not None and is_stop_message(recent, args.nudge_mode):
                     return "done"
-            replacement = restart_terminal_conversation(base_url, headers, conversation, args)
-            if replacement and replacement != "DRY-RUN":
-                state["new_conversations"].add(replacement)
-            return "sandbox-replaced" if replacement else (
-                "sandbox-replace-skipped" if args.dry_run else "sandbox-missing"
-            )
+            print("  Sandbox MISSING: canonical conversation is lost")
+            return "sandbox-missing"
 
         if sandbox_status == "ERROR":
             # Sandbox ERROR is recoverable in practice: keep the same conversation
@@ -490,14 +486,6 @@ def check_conversation(base_url, headers, conv_id, args, state):
     except Exception as exc:
         print(f"  Virhe: {exc}")
         return "error"
-
-
-def first_older_candidate(candidates):
-    """Return the newest older candidate whose sandbox is not already known MISSING."""
-    for candidate in candidates[1:]:
-        if candidate.get("sandbox_status") != "MISSING":
-            return candidate
-    return None
 
 
 def recover_repository_after_loss(
