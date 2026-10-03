@@ -13,7 +13,7 @@ name: openhands-keepalive
 #
 # External cron example (workflow_dispatch):
 #   POST /repos/<owner>/automation/actions/workflows/openhands-keepalive.yml/dispatches
-#   {"ref":"main","inputs":{"dry-run":"false","discover":"false"}}
+#   {"ref":"main","inputs":{"dry-run":"false","discover":"true"}}
 
 on:
   schedule:
@@ -23,7 +23,7 @@ on:
       dry-run:
         description: "Test without sending nudges"
         required: false
-        default: true
+        default: false
         type: boolean
       discover:
         description: "Auto-find active conversations via API (merged with ID list)"
