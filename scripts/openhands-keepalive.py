@@ -421,9 +421,12 @@ def has_recent_start_task(base_url, headers, repository, lookback_seconds=1800, 
         )
         r.raise_for_status()
         payload = r.json()
-        items = payload.get("items") or payload.get("results") or (
-            payload if isinstance(payload, list) else []
-        )
+        if isinstance(payload, dict):
+            items = payload.get("items") or payload.get("results") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
         active_statuses = {
             "WORKING",
             "WAITING_FOR_SANDBOX",
