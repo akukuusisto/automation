@@ -134,7 +134,12 @@ def discover_conversations(base_url, headers, limit=50):
         )
         r.raise_for_status()
         payload = r.json()
-        items = payload.get("items") or payload.get("results") or ([] if not isinstance(payload, list) else payload)
+        if isinstance(payload, dict):
+            items = payload.get("items") or payload.get("results") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
         # ERROR is intentionally discoverable: the existing conversation can
         # often recover by receiving another prompt, so do not retire it.
         recoverable = {"RUNNING", "PAUSED", "STARTING", "ERROR"}
