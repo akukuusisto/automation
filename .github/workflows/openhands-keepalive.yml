@@ -52,6 +52,12 @@ jobs:
           persist-credentials: false
       - name: Validate keepalive script
         run: python3 -m py_compile scripts/openhands-keepalive.py
+      - name: Install test dependency
+        shell: bash
+        run: |
+          python3 -c "import requests" 2>/dev/null || pip install --quiet requests
+      - name: Run keepalive tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Run keepalive check (once)
         shell: bash
         env:
@@ -67,5 +73,4 @@ jobs:
           # mutating the conversation-ID secret.
           OPENHANDS_AUTO_DISCOVER: "true"
         run: |
-          python3 -c "import requests" 2>/dev/null || pip install --quiet requests
           python3 scripts/openhands-keepalive.py --once
