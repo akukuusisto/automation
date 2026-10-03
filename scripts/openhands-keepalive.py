@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import sys
 import time
@@ -378,6 +379,81 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
         return False
 
 
+def _repository_from_start_task(task):
+    if not isinstance(task, dict):
+        return ""
+    repository = task.get("selected_repository")
+    if isinstance(repository, str):
+        return repository.strip()
+    request = task.get("request")
+    if isinstance(request, str):
+        try:
+            request = json.loads(request)
+        except json.JSONDecodeError:
+            request = None
+    if isinstance(request, dict):
+        repository = request.get("selected_repository") or request.get("repository")
+        if isinstance(repository, str):
+            return repository.strip()
+    return ""
+
+
+def has_recent_start_task(base_url, headers, repository, lookback_seconds=1800, limit=50):
+    """Return whether a recent non-terminal start task targets this repository.
+
+    This closes the network-error race where POST /app-conversations succeeds but
+    the response is lost before the conversation becomes visible to discovery.
+    On search failure we fail closed to avoid accidentally consuming another
+    conversation slot.
+    """
+    if not repository:
+        return False
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=lookback_seconds)
+    try:
+        r = requests.get(
+            f"{base_url}/api/v1/app-conversations/start-tasks/search",
+            headers=headers,
+            params={
+                "limit": limit,
+                "created_at__gte": since.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        items = payload.get("items") or payload.get("results") or (
+            payload if isinstance(payload, list) else []
+        )
+        active_statuses = {
+            "WORKING",
+            "WAITING_FOR_SANDBOX",
+            "PREPARING_REPOSITORY",
+            "SETTING_UP_SKILLS",
+            "READY",
+        }
+        for task in items:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "")).upper()
+            if status in active_statuses and _repository_from_start_task(task) == repository:
+                print(f"  start-task: aktiivinen/recent löytyy jo: {repository} ({status})")
+                return True
+        return False
+    except Exception as exc:
+        print(f"  start-task-haku epäonnistui: {exc} -> oletetaan start olevan mahdollinen ja estetään uusi")
+        return True
+
+
+def has_recoverable_repository(base_url, headers, repository, limit=50):
+    if not repository:
+        return False
+    if has_recent_start_task(base_url, headers, repository, limit=limit):
+        return True
+    if has_active_repository(base_url, headers, repository, limit):
+        return True
+    return False
+
+
 def restart_terminal_conversation(base_url, headers, conversation, args):
     """Start one replacement agent only when the sandbox is truly missing.
 
@@ -389,8 +465,8 @@ def restart_terminal_conversation(base_url, headers, conversation, args):
         print("  terminal recovery: selected_repository puuttuu -> ei startata")
         return None
 
-    if has_active_repository(base_url, headers, repository, args.discover_limit):
-        print(f"  terminal recovery: aktiivinen agentti löytyy jo: {repository}")
+    if has_recoverable_repository(base_url, headers, repository, args.discover_limit):
+        print(f"  terminal recovery: recoverable agentti/start-task löytyy jo: {repository}")
         return None
 
     print(f"  terminal recovery: käynnistetään uusi agentti: {repository}")
