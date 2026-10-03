@@ -122,34 +122,38 @@ def get_conversation(base_url, headers, conversation_id):
     return items[0]
 
 
-def discover_conversation_ids(base_url, headers, limit=50):
-    # TODO: paginate with next_page_id when discovery is enabled broadly.
-    # This PR intentionally keeps discovery single-page; explicit secret IDs
-    # remain the authoritative scope for normal use.
+def discover_conversations(base_url, headers, limit=50):
+    """Return recoverable conversations with metadata."""
     try:
-        r = requests.get(f"{base_url}/api/v1/app-conversations/search", headers=headers, params={"limit": limit}, timeout=45)
+        r = requests.get(
+            f"{base_url}/api/v1/app-conversations/search",
+            headers=headers,
+            params={"limit": limit},
+            timeout=45,
+        )
         r.raise_for_status()
         payload = r.json()
         items = payload.get("items") or payload.get("results") or ([] if not isinstance(payload, list) else payload)
-        # Discovery scope (documentation only; not enforced yet):
-        # keep normal operation on explicit OPENHANDS_CONVERSATION_IDS.
-        # Future discovery should be allowlisted to approved repositories only.
-        # Current planned scope: akukuusisto/automation, akukuusisto/tradefoundry,
-        # akukuusisto/accounter, akukuusisto/ridekernel-explore, akukuusisto/atlas.
-        active = {"RUNNING", "PAUSED"}
+        # ERROR is intentionally discoverable: the existing conversation can
+        # often recover by receiving another prompt, so do not retire it.
+        recoverable = {"RUNNING", "PAUSED", "STARTING", "ERROR"}
         found, seen = [], set()
         for item in items:
             if not isinstance(item, dict):
                 continue
             cid = (item.get("id") or "").strip()
-            if cid and cid not in seen and item.get("sandbox_status") in active:
+            if cid and cid not in seen and item.get("sandbox_status") in recoverable:
                 seen.add(cid)
-                found.append(cid)
-        print(f"  discover: {len(found)} aktiivista")
+                found.append(item)
+        print(f"  discover: {len(found)} recoverable")
         return found
     except Exception as exc:
-        print(f"  discover ep\u00e4onnistui: {exc}")
+        print(f"  discover epäonnistui: {exc}")
         return []
+
+
+def discover_conversation_ids(base_url, headers, limit=50):
+    return [item["id"] for item in discover_conversations(base_url, headers, limit)]
 
 
 def _coerce_text(value):
@@ -375,10 +379,10 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
 
 
 def restart_terminal_conversation(base_url, headers, conversation, args):
-    """Start one replacement agent for a terminal conversation.
+    """Start one replacement agent only when the sandbox is truly missing.
 
-    Do not start a duplicate if another active conversation already works on
-    the same repository. This makes retries safe across scheduled runs.
+    Do not start a duplicate if another recoverable conversation already works
+    on the same repository. This makes retries safe across scheduled runs.
     """
     repository = (conversation.get("selected_repository") or "").strip()
     if not repository:
@@ -413,7 +417,7 @@ def check_conversation(base_url, headers, conv_id, args, state):
         idle_text = f"{idle_for}s idle" if idle_for is not None else "idle unknown"
         print(f"[{ts}] [{conv_id[:8]}] sandbox={sandbox_status} exec={execution_status} {idle_text} title={title!r}")
 
-        if sandbox_status in ("MISSING", "ERROR"):
+        if sandbox_status == "MISSING":
             if not args.no_done_check:
                 recent = fetch_recent_events(base_url, headers, conv_id)
                 if recent is not None and is_stop_message(recent, args.nudge_mode):
@@ -421,9 +425,14 @@ def check_conversation(base_url, headers, conv_id, args, state):
             replacement = restart_terminal_conversation(base_url, headers, conversation, args)
             if replacement and replacement != "DRY-RUN":
                 state["new_conversations"].add(replacement)
-            return "terminal-restarted" if replacement else (
-                "terminal-restart-skipped" if args.dry_run else "terminal-error"
+            return "sandbox-replaced" if replacement else (
+                "sandbox-replace-skipped" if args.dry_run else "sandbox-missing"
             )
+
+        if sandbox_status == "ERROR":
+            # Sandbox ERROR is recoverable in practice: keep the same conversation
+            # and use the normal execution-idle nudge path below.
+            pass
 
         if sandbox_status == "PAUSED":
             last_resume = state["last_resume"].get(conv_id, 0.0)
@@ -444,7 +453,7 @@ def check_conversation(base_url, headers, conv_id, args, state):
 
         if sandbox_status == "STARTING":
             return "starting"
-        if sandbox_status != "RUNNING":
+        if sandbox_status not in ("RUNNING", "ERROR"):
             return "not-running"
         if execution_status == "running":
             return "running"
@@ -547,7 +556,8 @@ def main():
         for cid in list(active):
             outcome = check_conversation(base_url, headers, cid, args, state)
             if outcome in ("retire-sandbox", "terminal-error", "terminal-restarted",
-                            "terminal-restart-skipped", "done"):
+                            "terminal-restart-skipped", "sandbox-replaced",
+                            "sandbox-replace-skipped", "sandbox-missing", "done"):
                 active.remove(cid)
         if not active:
             break
