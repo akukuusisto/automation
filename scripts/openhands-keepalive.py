@@ -5,7 +5,7 @@ Normal operation selects only the newest conversation for each repository.
 An older conversation is considered only after the newest conversation's
 sandbox is genuinely gone (MISSING/not found). This prevents parallel agents
 from the same repository while still allowing recovery to an older conversation.
-""""""
+"""
 from __future__ import annotations
 
 import argparse
@@ -228,7 +228,7 @@ def select_latest_per_repository(groups):
     }
 
 
-def _coerce_text(value):def _coerce_text(value):
+def _coerce_text(value):
     try:
         if value is None:
             return ""
@@ -557,18 +557,27 @@ def write_step_summary(results):
     if not path:
         return
     try:
-        lines = ["### OpenHands keepalive", "", "| Conversation | Outcome |", "|---|---|"]
-        for cid, outcome in results:
-            lines.append(f"| `{cid[:8]}` | `{outcome}` |")
+        lines = [
+            "### OpenHands keepalive",
+            "",
+            "| Repository | Conversation | Outcome |",
+            "|---|---|---|",
+        ]
+        for repository, cid, outcome in results:
+            lines.append(
+                f"| `{repository}` | `{cid[:8] if cid else '-'}` | `{outcome}` |"
+            )
         counts = {}
-        for _, o in results:
-            counts[o] = counts.get(o, 0) + 1
+        for _, _, outcome in results:
+            counts[outcome] = counts.get(outcome, 0) + 1
         lines.append("")
-        lines.append("Summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+        lines.append(
+            "Summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        )
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
     except Exception as exc:
-        print(f"  step summary ep\u00e4onnistui: {exc}")
+        print(f"  step summary epäonnistui: {exc}")
 
 
 def main():
