@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""OpenHands Cloud keepalive / auto-nudge.
+"""OpenHands Cloud keepalive / one-canonical-conversation-per-repository.
 
-Monitors conversations and sends a continuity nudge when idle too long.
-
-Modes: --once (cron/Actions), continuous poll, --discover (API auto-list).
-Nudge modes: loop (default) or task. See --help and workflow comments.
-"""
+Normal operation selects only the newest conversation for each repository.
+An older conversation is considered only after the newest conversation's
+sandbox is genuinely gone (MISSING/not found). This prevents parallel agents
+from the same repository while still allowing recovery to an older conversation.
+""""""
 from __future__ import annotations
 
 import argparse
@@ -20,6 +20,11 @@ try:
 except ImportError:
     print("requests puuttuu. Asenna:\n  python -m pip install requests", file=sys.stderr)
     sys.exit(1)
+
+
+class ConversationNotFound(RuntimeError):
+    """Raised only when OpenHands confirms that a conversation no longer exists."""
+
 
 DEFAULT_NUDGE_LOOP = (
     "Jatka autonomista looppia ty\u00f6nkulkusi mukaan.\n\n"
@@ -73,6 +78,7 @@ def parse_args():
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--discover", action="store_true", default=_env_bool("OPENHANDS_AUTO_DISCOVER"))
     parser.add_argument("--discover-limit", type=int, default=int(os.getenv("OPENHANDS_DISCOVER_LIMIT", "50")))
+    parser.add_argument("--discover-max-pages", type=int, default=int(os.getenv("OPENHANDS_DISCOVER_MAX_PAGES", "100")))
     parser.add_argument("--no-done-check", action="store_true", default=_env_bool("OPENHANDS_NO_DONE_CHECK"))
     args = parser.parse_args()
     if args.nudge is None:
@@ -115,54 +121,114 @@ def parse_updated_at(value: str) -> float:
 
 
 def get_conversation(base_url, headers, conversation_id):
-    r = requests.get(f"{base_url}/api/v1/app-conversations", headers=headers, params={"ids": conversation_id}, timeout=30)
+    r = requests.get(
+        f"{base_url}/api/v1/app-conversations",
+        headers=headers,
+        params={"ids": conversation_id},
+        timeout=30,
+    )
+    if r.status_code == 404:
+        raise ConversationNotFound(conversation_id)
     r.raise_for_status()
     items = r.json()
     if not items or not items[0]:
-        raise RuntimeError("Conversation not found")
+        raise ConversationNotFound(conversation_id)
     return items[0]
 
 
-def discover_conversations(base_url, headers, limit=50):
-    """Return recoverable conversations with metadata."""
+def conversation_created_ts(conversation: dict) -> float:
+    """Use creation time for canonical ordering, with updated_at as a fallback."""
+    return parse_updated_at(conversation.get("created_at", "")) or parse_updated_at(
+        conversation.get("updated_at", "")
+    )
+
+
+def discover_conversations(base_url, headers, limit=50, max_pages=100):
+    """Return all available conversations, paginating through the V1 search API."""
+    all_items = []
+    seen = set()
+    page_id = None
     try:
-        r = requests.get(
-            f"{base_url}/api/v1/app-conversations/search",
-            headers=headers,
-            params={"limit": limit},
-            timeout=45,
-        )
-        r.raise_for_status()
-        payload = r.json()
-        if isinstance(payload, dict):
-            items = payload.get("items") or payload.get("results") or []
-        elif isinstance(payload, list):
-            items = payload
+        for page in range(1, max_pages + 1):
+            params = {"limit": limit}
+            if page_id:
+                params["page_id"] = page_id
+            r = requests.get(
+                f"{base_url}/api/v1/app-conversations/search",
+                headers=headers,
+                params=params,
+                timeout=45,
+            )
+            r.raise_for_status()
+            payload = r.json()
+            if isinstance(payload, dict):
+                items = payload.get("items") or payload.get("results") or []
+                next_page_id = payload.get("next_page_id")
+            elif isinstance(payload, list):
+                items = payload
+                next_page_id = None
+            else:
+                items = []
+                next_page_id = None
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                cid = (item.get("id") or "").strip()
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    all_items.append(item)
+
+            if not next_page_id or next_page_id == page_id:
+                break
+            page_id = next_page_id
         else:
-            items = []
-        # ERROR is intentionally discoverable: the existing conversation can
-        # often recover by receiving another prompt, so do not retire it.
-        recoverable = {"RUNNING", "PAUSED", "STARTING", "ERROR"}
-        found, seen = [], set()
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            cid = (item.get("id") or "").strip()
-            if cid and cid not in seen and item.get("sandbox_status") in recoverable:
-                seen.add(cid)
-                found.append(item)
-        print(f"  discover: {len(found)} recoverable")
-        return found
+            print(f"  discover: max pages {max_pages} reached")
+        print(f"  discover: {len(all_items)} conversations")
+        return all_items
     except Exception as exc:
         print(f"  discover epäonnistui: {exc}")
         return []
 
 
-def discover_conversation_ids(base_url, headers, limit=50):
-    return [item["id"] for item in discover_conversations(base_url, headers, limit)]
+def _repository_from_conversation(conversation):
+    if not isinstance(conversation, dict):
+        return ""
+    repository = conversation.get("selected_repository")
+    return repository.strip() if isinstance(repository, str) else ""
 
 
-def _coerce_text(value):
+def group_conversations_by_repository(items, skip_ids=None):
+    groups = {}
+    skip_ids = skip_ids or set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        cid = (item.get("id") or "").strip()
+        repository = _repository_from_conversation(item)
+        if not cid or not repository or cid in skip_ids:
+            continue
+        groups.setdefault(repository, []).append(item)
+
+    for repository, candidates in groups.items():
+        candidates.sort(
+            key=lambda item: (conversation_created_ts(item), str(item.get("id") or "")),
+            reverse=True,
+        )
+        groups[repository] = candidates
+    return groups
+
+
+def select_latest_per_repository(groups):
+    """Return exactly one candidate—the newest conversation—for each repository."""
+    return {
+        repository: candidates[0]
+        for repository, candidates in groups.items()
+        if candidates
+    }
+
+
+def _coerce_text(value):def _coerce_text(value):
     try:
         if value is None:
             return ""
@@ -333,154 +399,6 @@ def start_conversation(base_url, headers, repository, text, dry_run, poll_attemp
         return None
 
 
-def has_active_repository(base_url, headers, repository, limit=50):
-    if not repository:
-        return False
-    for item in discover_conversations(base_url, headers, limit):
-        if item.get("selected_repository") == repository:
-            return True
-    return False
-
-
-def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=None):
-    if dry_run:
-        print("  DRY-RUN: nudgea ei l\u00e4hetetty")
-        return True
-    payload = {"role": "user", "run": True, "content": [{"type": "text", "text": text}]}
-    try:
-        r = requests.post(
-            f"{base_url}/api/v1/app-conversations/{conversation_id}/send-message",
-            headers=headers, timeout=30, json=payload,
-        )
-        if r.status_code < 300:
-            print(f"  send-message OK: {r.text[:200]}")
-            return True
-        print(f"  send-message -> {r.status_code}: {r.text[:200]}")
-        if r.status_code in (409, 410):
-            return False
-    except Exception as exc:
-        print(f"  send-message virhe: {exc}")
-    conv = conversation or {}
-    conv_url = (conv.get("conversation_url") or "").rstrip("/")
-    session_key = conv.get("session_api_key") or ""
-    if not conv_url or not session_key:
-        print("  fallback: conversation_url/session_api_key puuttuu")
-        return False
-    try:
-        rh = {"X-Session-API-Key": session_key, "Content-Type": "application/json"}
-        r = requests.post(f"{conv_url}/events", headers=rh, timeout=30, json=payload)
-        if r.status_code < 300:
-            print(f"  runtime events OK: {r.text[:200]}")
-            try:
-                rr = requests.post(f"{conv_url}/run", headers=rh, timeout=15)
-                print(f"  runtime run -> {rr.status_code}")
-            except Exception:
-                pass
-            return True
-        print(f"  runtime events -> {r.status_code}: {r.text[:200]}")
-        return False
-    except Exception as exc:
-        print(f"  runtime fallback virhe: {exc}")
-        return False
-
-
-def _repository_from_start_task(task):
-    if not isinstance(task, dict):
-        return ""
-    repository = task.get("selected_repository")
-    if isinstance(repository, str):
-        return repository.strip()
-    request = task.get("request")
-    if isinstance(request, str):
-        try:
-            request = json.loads(request)
-        except json.JSONDecodeError:
-            request = None
-    if isinstance(request, dict):
-        repository = request.get("selected_repository") or request.get("repository")
-        if isinstance(repository, str):
-            return repository.strip()
-    return ""
-
-
-def has_recent_start_task(base_url, headers, repository, lookback_seconds=1800, limit=50):
-    """Return whether a recent non-terminal start task targets this repository.
-
-    This closes the network-error race where POST /app-conversations succeeds but
-    the response is lost before the conversation becomes visible to discovery.
-    On search failure we fail closed to avoid accidentally consuming another
-    conversation slot.
-    """
-    if not repository:
-        return False
-    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=lookback_seconds)
-    try:
-        r = requests.get(
-            f"{base_url}/api/v1/app-conversations/start-tasks/search",
-            headers=headers,
-            params={
-                "limit": limit,
-                "created_at__gte": since.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            },
-            timeout=30,
-        )
-        r.raise_for_status()
-        payload = r.json()
-        if isinstance(payload, dict):
-            items = payload.get("items") or payload.get("results") or []
-        elif isinstance(payload, list):
-            items = payload
-        else:
-            items = []
-        active_statuses = {
-            "WORKING",
-            "WAITING_FOR_SANDBOX",
-            "PREPARING_REPOSITORY",
-            "SETTING_UP_SKILLS",
-            "READY",
-        }
-        for task in items:
-            if not isinstance(task, dict):
-                continue
-            status = str(task.get("status", "")).upper()
-            if status in active_statuses and _repository_from_start_task(task) == repository:
-                print(f"  start-task: aktiivinen/recent löytyy jo: {repository} ({status})")
-                return True
-        return False
-    except Exception as exc:
-        print(f"  start-task-haku epäonnistui: {exc} -> oletetaan start olevan mahdollinen ja estetään uusi")
-        return True
-
-
-def has_recoverable_repository(base_url, headers, repository, limit=50):
-    if not repository:
-        return False
-    if has_recent_start_task(base_url, headers, repository, limit=limit):
-        return True
-    if has_active_repository(base_url, headers, repository, limit):
-        return True
-    return False
-
-
-def restart_terminal_conversation(base_url, headers, conversation, args):
-    """Start one replacement agent only when the sandbox is truly missing.
-
-    Do not start a duplicate if another recoverable conversation already works
-    on the same repository. This makes retries safe across scheduled runs.
-    """
-    repository = (conversation.get("selected_repository") or "").strip()
-    if not repository:
-        print("  terminal recovery: selected_repository puuttuu -> ei startata")
-        return None
-
-    if has_recoverable_repository(base_url, headers, repository, args.discover_limit):
-        print(f"  terminal recovery: recoverable agentti/start-task löytyy jo: {repository}")
-        return None
-
-    print(f"  terminal recovery: käynnistetään uusi agentti: {repository}")
-    return start_conversation(base_url, headers, repository, args.nudge, args.dry_run)
-
-
 def check_conversation(base_url, headers, conv_id, args, state):
     dry_run = args.dry_run
     nudges = state["nudges"].get(conv_id, 0)
@@ -560,6 +478,9 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 return "dry-nudge" if dry_run else "nudged"
             return "nudge-failed"
         return "unknown"
+    except ConversationNotFound:
+        print(f"  Conversation {conv_id} ei enää löydy -> fallback sallittu")
+        return "not-found"
     except requests.HTTPError as exc:
         print(f"  HTTP-virhe: {exc}")
         return "http-error"
@@ -569,6 +490,78 @@ def check_conversation(base_url, headers, conv_id, args, state):
     except Exception as exc:
         print(f"  Virhe: {exc}")
         return "error"
+
+
+def first_older_candidate(candidates):
+    """Return the newest older candidate whose sandbox is not already known MISSING."""
+    for candidate in candidates[1:]:
+        if candidate.get("sandbox_status") != "MISSING":
+            return candidate
+    return None
+
+
+def recover_repository_after_loss(
+    base_url, headers, repository, candidates, args, state
+):
+    """After canonical loss, reuse the newest older conversation if possible."""
+    for candidate in candidates[1:]:
+        cid = (candidate.get("id") or "").strip()
+        if not cid or candidate.get("sandbox_status") == "MISSING":
+            continue
+
+        print(
+            f"  fallback: canonical menetetty -> kokeillaan vanhempaa "
+            f"conversationia {cid[:8]} repo={repository}"
+        )
+        outcome = check_conversation(base_url, headers, cid, args, state)
+        if outcome in ("sandbox-missing", "not-found"):
+            continue
+
+        print(f"  fallback conversation valittu: {cid[:8]} ({outcome})")
+        return cid, outcome
+
+    if has_recent_start_task(base_url, headers, repository, limit=args.discover_limit):
+        return "", "replacement-start-skipped"
+
+    replacement = start_conversation(
+        base_url, headers, repository, args.nudge, args.dry_run
+    )
+    if replacement and replacement != "DRY-RUN":
+        state["new_conversations"].add(replacement)
+    return replacement or "", "sandbox-replaced" if replacement else "replacement-failed"
+
+
+def collect_conversation_groups(base_url, headers, args, seed_ids, skip_ids):
+    items = (
+        discover_conversations(
+            base_url,
+            headers,
+            limit=args.discover_limit,
+            max_pages=args.discover_max_pages,
+        )
+        if args.discover
+        else []
+    )
+
+    known_ids = {
+        (item.get("id") or "").strip()
+        for item in items
+        if isinstance(item, dict)
+    }
+
+    for cid in seed_ids:
+        if cid in known_ids:
+            continue
+        try:
+            item = get_conversation(base_url, headers, cid)
+            items.append(item)
+            known_ids.add(cid)
+        except ConversationNotFound:
+            print(f"  seed conversation ei enää löydy: {cid}")
+        except requests.RequestException as exc:
+            print(f"  seed conversation -haku epäonnistui {cid[:8]}: {exc}")
+
+    return group_conversations_by_repository(items, skip_ids=skip_ids)
 
 
 def write_step_summary(results):
@@ -597,55 +590,81 @@ def main():
         print("OPENHANDS_API_KEY puuttuu", file=sys.stderr)
         sys.exit(2)
     if args.idle_timeout <= 0:
-        print("--idle-timeout pit\u00e4\u00e4 olla > 0", file=sys.stderr)
+        print("--idle-timeout pitää olla > 0", file=sys.stderr)
         sys.exit(2)
+
     base_url = args.base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     state = {"nudges": {}, "last_resume": {}, "new_conversations": set()}
-    conv_ids = resolve_conversation_ids(args)
+    seed_ids = resolve_conversation_ids(args)
     skip_ids = resolve_skip_ids()
-    if args.discover:
-        for item in discover_conversations(base_url, headers, limit=args.discover_limit):
-            cid = item["id"]
-            if cid not in conv_ids:
-                conv_ids.append(cid)
-    if skip_ids:
-        conv_ids = [c for c in conv_ids if c not in skip_ids]
-    if not conv_ids:
-        print("Ei conversation-ID:it\u00e4. Aseta lista tai --discover.", file=sys.stderr)
+
+    groups = collect_conversation_groups(
+        base_url, headers, args, seed_ids=seed_ids, skip_ids=skip_ids
+    )
+    latest = select_latest_per_repository(groups)
+
+    if not latest:
+        print("Ei hallittavia conversationeita löydetty.", file=sys.stderr)
         sys.exit(2)
+
     print("--- OpenHands keepalive ---")
     print(f"nudge-mode: {args.nudge_mode}")
     print(f"discover: {bool(args.discover)}")
-    print(f"conversations: {len(conv_ids)}")
-    for cid in conv_ids:
-        print(f"  - {cid}")
+    print(f"repositories: {len(latest)}")
+    for repository, candidate in sorted(latest.items()):
+        print(
+            f"  - {repository}: {candidate.get('id', '')[:8]} "
+            f"created={candidate.get('created_at') or '-'} "
+            f"sandbox={candidate.get('sandbox_status')}"
+        )
     print(f"idle timeout: {args.idle_timeout}s")
     if args.dry_run:
         print("DRY-RUN")
     print()
+
+    results = []
+    for repository in sorted(groups):
+        candidates = groups[repository]
+        canonical = candidates[0]
+        cid = (canonical.get("id") or "").strip()
+        outcome = check_conversation(base_url, headers, cid, args, state)
+
+        if outcome in ("sandbox-missing", "not-found"):
+            fallback_cid, fallback_outcome = recover_repository_after_loss(
+                base_url, headers, repository, candidates, args, state
+            )
+            cid = fallback_cid or cid
+            outcome = fallback_outcome
+
+        results.append((repository, cid, outcome))
+        print()
+
     if args.once:
-        results = []
-        for i, cid in enumerate(conv_ids):
-            if i:
-                time.sleep(0.5)
-            results.append((cid, check_conversation(base_url, headers, cid, args, state)))
+        write_step_summary(
+            [(repo, cid, outcome) for repo, cid, outcome in results]
+        )
         print("--- Yhteenveto ---")
-        for cid, outcome in results:
-            print(f"  {cid[:8]}: {outcome}")
-        write_step_summary(results)
+        for repository, cid, outcome in results:
+            print(f"  {repository}: {cid[:8] if cid else '-'} -> {outcome}")
         return
-    active = list(conv_ids)
+
+    active = [cid for _, cid, outcome in results if cid and outcome not in (
+        "done", "sandbox-replaced", "replacement-failed", "replacement-start-skipped"
+    )]
     while active:
+        # Continuous local mode keeps the already-selected canonical/fallback
+        # conversations alive. It never re-discovers a second conversation for
+        # the same repository during the same run.
         for cid in list(active):
             outcome = check_conversation(base_url, headers, cid, args, state)
-            if outcome in ("retire-sandbox", "terminal-error", "terminal-restarted",
-                            "terminal-restart-skipped", "sandbox-replaced",
-                            "sandbox-replace-skipped", "sandbox-missing", "done"):
+            if outcome in ("done", "sandbox-missing", "not-found"):
                 active.remove(cid)
         if not active:
             break
         time.sleep(args.interval)
+
+
 
 
 if __name__ == "__main__":
