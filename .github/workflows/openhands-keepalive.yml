@@ -3,7 +3,8 @@ name: openhands-keepalive
 # Keeps OpenHands agents alive and automatically starts a replacement agent
 # when a sandbox is actually lost (sandbox MISSING). Recoverable execution
 # errors and sandbox ERROR states stay on the original conversation.
-# so replacement conversation IDs do not need to be written back to secrets.
+# Replacement conversation IDs are discovered automatically and do not need
+# to be written back to secrets.
 #
 # Secrets (Settings -> Secrets and variables -> Actions):
 #   OPENHANDS_API_KEY            required
