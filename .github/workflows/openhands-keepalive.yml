@@ -1,18 +1,20 @@
 name: openhands-keepalive
 
-# Keeps OpenHands conversations alive. Primary trigger: external cron (~15 min)
-# via workflow_dispatch. GitHub schedule is backup only (not guaranteed).
-# Idle 15 min + cron 15 min => worst-case ~30 min to nudge if jobs run.
+# Keeps OpenHands agents alive and automatically starts a replacement agent
+# when a sandbox is actually lost (sandbox MISSING). Recoverable execution
+# errors and sandbox ERROR states stay on the original conversation.
+# Replacement conversation IDs are discovered automatically and do not need
+# to be written back to secrets.
 #
 # Secrets (Settings -> Secrets and variables -> Actions):
 #   OPENHANDS_API_KEY            required
-#   OPENHANDS_CONVERSATION_IDS   optional if discover=true
+#   OPENHANDS_CONVERSATION_IDS   seed/legacy IDs; active IDs are auto-discovered
 #   OPENHANDS_SKIP_IDS           optional
 #   OPENHANDS_NUDGE              optional override text
 #
 # External cron example (workflow_dispatch):
 #   POST /repos/<owner>/automation/actions/workflows/openhands-keepalive.yml/dispatches
-#   {"ref":"main","inputs":{"dry-run":"false","discover":"false"}}
+#   {"ref":"main","inputs":{"dry-run":"false","discover":"true"}}
 
 on:
   schedule:
@@ -22,12 +24,12 @@ on:
       dry-run:
         description: "Test without sending nudges"
         required: false
-        default: true
+        default: false
         type: boolean
       discover:
         description: "Auto-find active conversations via API (merged with ID list)"
         required: false
-        default: false
+        default: true
         type: boolean
 
 run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }}, discover=${{ inputs.discover || false }})"
@@ -48,6 +50,14 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Validate keepalive script
+        run: python3 -m py_compile scripts/openhands-keepalive.py
+      - name: Install test dependency
+        shell: bash
+        run: |
+          python3 -c "import requests" 2>/dev/null || pip install --quiet requests
+      - name: Run keepalive tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Run keepalive check (once)
         shell: bash
         env:
@@ -59,7 +69,8 @@ jobs:
           OPENHANDS_IDLE_TIMEOUT: "900"
           OPENHANDS_RESUME_COOLDOWN: "900"
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
-          OPENHANDS_AUTO_DISCOVER: ${{ inputs.discover || false }}
+          # Discover recoverable conversations so replacement IDs are picked up without
+          # mutating the conversation-ID secret.
+          OPENHANDS_AUTO_DISCOVER: "true"
         run: |
-          python3 -c "import requests" 2>/dev/null || pip install --quiet requests
           python3 scripts/openhands-keepalive.py --once
