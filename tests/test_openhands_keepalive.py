@@ -155,7 +155,7 @@ class NudgeRecoveryTests(unittest.TestCase):
                 "title": "failed agent",
                 "sandbox_id": "sandbox-1",
             }
-            MODULE.latest_activity_ts = lambda *args: 0.0
+            MODULE.latest_activity_ts = lambda *args: MODULE.time.time() - 3600
             calls = []
             MODULE.send_nudge = lambda *args: calls.append(args) or True
 
