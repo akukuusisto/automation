@@ -399,6 +399,99 @@ def start_conversation(base_url, headers, repository, text, dry_run, poll_attemp
         return None
 
 
+
+def _repository_from_start_task(task):
+    """Extract the selected repository from an OpenHands start-task payload."""
+    if not isinstance(task, dict):
+        return ""
+    repository = task.get("selected_repository")
+    if isinstance(repository, str):
+        return repository.strip()
+
+    request = task.get("request")
+    if isinstance(request, str):
+        try:
+            request = json.loads(request)
+        except json.JSONDecodeError:
+            request = None
+
+    if isinstance(request, dict):
+        repository = request.get("selected_repository") or request.get("repository")
+        if isinstance(repository, str):
+            return repository.strip()
+    return ""
+
+
+def has_recent_start_task(
+    base_url, headers, repository, lookback_seconds=1800, limit=50
+):
+    """Return whether a recent non-terminal start task targets this repository.
+
+    A successful conversation-start request can temporarily exist only as a
+    start-task before the conversation is visible to discovery. Checking these
+    tasks prevents a scheduled retry from creating a duplicate conversation.
+
+    Search failures fail closed: a replacement is skipped rather than risking
+    another concurrent OpenHands conversation for the same repository.
+    """
+    if not repository:
+        return False
+
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        seconds=lookback_seconds
+    )
+    try:
+        response = requests.get(
+            f"{base_url}/api/v1/app-conversations/start-tasks/search",
+            headers=headers,
+            params={
+                "limit": limit,
+                "created_at__gte": since.isoformat(timespec="milliseconds").replace(
+                    "+00:00", "Z"
+                ),
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        if isinstance(payload, dict):
+            items = payload.get("items") or payload.get("results") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+
+        active_statuses = {
+            "WORKING",
+            "WAITING_FOR_SANDBOX",
+            "PREPARING_REPOSITORY",
+            "SETTING_UP_SKILLS",
+            "READY",
+        }
+        for task in items:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "")).upper()
+            if (
+                status in active_statuses
+                and _repository_from_start_task(task) == repository
+            ):
+                print(
+                    f"  start-task: aktiivinen/recent löytyy jo: "
+                    f"{repository} ({status})"
+                )
+                return True
+
+        return False
+    except Exception as exc:
+        print(
+            f"  start-task-haku epäonnistui: {exc} -> "
+            "oletetaan start olevan mahdollinen ja estetään uusi"
+        )
+        return True
+
+
 def check_conversation(base_url, headers, conv_id, args, state):
     dry_run = args.dry_run
     nudges = state["nudges"].get(conv_id, 0)
