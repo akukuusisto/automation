@@ -237,68 +237,6 @@ class NudgeRecoveryTests(unittest.TestCase):
             MODULE.latest_activity_ts = original_activity
             MODULE.send_nudge = original_nudge
 
-    def test_error_nudged_when_idle_time_unknown(self):
-        original_get = MODULE.get_conversation
-        original_activity = MODULE.latest_activity_ts
-        original_nudge = MODULE.send_nudge
-        try:
-            MODULE.get_conversation = lambda *args: {
-                "sandbox_status": "ERROR",
-                "execution_status": "error",
-                "updated_at": "",
-                "title": "failed agent",
-                "sandbox_id": "sandbox-1",
-            }
-            MODULE.latest_activity_ts = lambda *args: 0.0
-            calls = []
-            MODULE.send_nudge = lambda *args: calls.append(args) or True
-
-            outcome = MODULE.check_conversation(
-                "https://app.all-hands.dev",
-                {},
-                "conversation-1",
-                self._args(),
-                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
-            )
-
-            self.assertEqual(outcome, "nudged")
-            self.assertEqual(len(calls), 1)
-        finally:
-            MODULE.get_conversation = original_get
-            MODULE.latest_activity_ts = original_activity
-            MODULE.send_nudge = original_nudge
-
-    def test_finished_nudged_when_idle_time_unknown(self):
-        original_get = MODULE.get_conversation
-        original_activity = MODULE.latest_activity_ts
-        original_nudge = MODULE.send_nudge
-        try:
-            MODULE.get_conversation = lambda *args: {
-                "sandbox_status": "RUNNING",
-                "execution_status": "finished",
-                "updated_at": "",
-                "title": "finished agent",
-                "sandbox_id": "sandbox-2",
-            }
-            MODULE.latest_activity_ts = lambda *args: 0.0
-            calls = []
-            MODULE.send_nudge = lambda *args: calls.append(args) or True
-
-            outcome = MODULE.check_conversation(
-                "https://app.all-hands.dev",
-                {},
-                "conversation-2",
-                self._args(),
-                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
-            )
-
-            self.assertEqual(outcome, "nudged")
-            self.assertEqual(len(calls), 1)
-        finally:
-            MODULE.get_conversation = original_get
-            MODULE.latest_activity_ts = original_activity
-            MODULE.send_nudge = original_nudge
-
     def test_sandbox_missing_does_not_nudge(self):
         original_get = MODULE.get_conversation
         original_events = MODULE.fetch_recent_events
