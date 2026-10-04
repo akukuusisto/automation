@@ -615,8 +615,13 @@ def check_conversation(base_url, headers, conv_id, args, state):
 
         if execution_status in ("finished", "idle", "stuck", "error", None):
             if idle_for is None:
-                return "idle-unknown"
-            if idle_for < args.idle_timeout:
+                print(
+                    f"  Idle-aikaa ei voitu mitata "
+                    f"(sandbox={sandbox_status} exec={execution_status}) "
+                    f"-> käsitellään idle-timeoutina"
+                )
+                idle_for = args.idle_timeout
+            elif idle_for < args.idle_timeout:
                 print(f"  Ei viel\u00e4 idle: {idle_for}s / {args.idle_timeout}s")
                 return "idle-wait"
             if not args.no_done_check:
