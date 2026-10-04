@@ -50,6 +50,43 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Apply idle-unknown recovery patch
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path("scripts/openhands-keepalive.py")
+          text = path.read_text(encoding="utf-8")
+          old = (
+              "            if idle_for is None:\n"
+              "                return \"idle-unknown\"\n"
+          )
+          new = (
+              "            if idle_for is None:\n"
+              "                if sandbox_status == \"ERROR\" or execution_status in (\n"
+              "                    \"finished\",\n"
+              "                    \"idle\",\n"
+              "                    \"stuck\",\n"
+              "                    \"error\",\n"
+              "                ):\n"
+              "                    print(\n"
+              "                        f\"  Idle-aikaa ei voitu mitata \"\n"
+              "                        f\"(sandbox={sandbox_status} exec={execution_status}) \"\n"
+              "                        f\"-> käsitellään idle-timeoutina\"\n"
+              "                    )\n"
+              "                    idle_for = args.idle_timeout\n"
+              "                else:\n"
+              "                    return \"idle-unknown\"\n"
+          )
+          if old not in text:
+              if "Idle-aikaa ei voitu mitata" in text:
+                  print("patch already applied")
+              else:
+                  raise SystemExit("idle-unknown block not found; cannot patch")
+          else:
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+              print("applied idle-unknown recovery patch")
+          PY
       - name: Validate keepalive script
         run: python3 -m py_compile scripts/openhands-keepalive.py
       - name: Install test dependency
@@ -71,6 +108,7 @@ jobs:
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
           # Discover recoverable conversations so replacement IDs are picked up without
           # mutating the conversation-ID secret.
-          OPENHANDS_AUTO_DISCOVER: "true"
+          # workflow_dispatch can set discover=false; schedule has no inputs -> default true
+          OPENHANDS_AUTO_DISCOVER: ${{ github.event_name == 'schedule' || inputs.discover }}
         run: |
           python3 scripts/openhands-keepalive.py --once
