@@ -71,6 +71,7 @@ jobs:
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
           # Discover recoverable conversations so replacement IDs are picked up without
           # mutating the conversation-ID secret.
-          OPENHANDS_AUTO_DISCOVER: "true"
+          # workflow_dispatch can set discover=false; schedule has no inputs -> default true
+          OPENHANDS_AUTO_DISCOVER: ${{ github.event_name == 'schedule' || inputs.discover }}
         run: |
           python3 scripts/openhands-keepalive.py --once
