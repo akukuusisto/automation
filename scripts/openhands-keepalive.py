@@ -333,6 +333,68 @@ def try_resume(base_url, headers, sandbox_id, dry_run):
         return False
 
 
+
+def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=None):
+    """Send a user nudge to an existing conversation, with runtime fallback."""
+    if dry_run:
+        print("  DRY-RUN: nudgea ei lähetetty")
+        return True
+
+    payload = {
+        "role": "user",
+        "run": True,
+        "content": [{"type": "text", "text": text}],
+    }
+    try:
+        r = requests.post(
+            f"{base_url}/api/v1/app-conversations/{conversation_id}/send-message",
+            headers=headers,
+            timeout=30,
+            json=payload,
+        )
+        if r.status_code < 300:
+            print(f"  send-message OK: {r.text[:200]}")
+            return True
+        print(f"  send-message -> {r.status_code}: {r.text[:200]}")
+        if r.status_code in (409, 410):
+            return False
+    except Exception as exc:
+        print(f"  send-message virhe: {exc}")
+
+    conv = conversation or {}
+    conv_url = (conv.get("conversation_url") or "").rstrip("/")
+    session_key = conv.get("session_api_key") or ""
+    if not conv_url or not session_key:
+        print("  fallback: conversation_url/session_api_key puuttuu")
+        return False
+
+    try:
+        rh = {"X-Session-API-Key": session_key, "Content-Type": "application/json"}
+        r = requests.post(
+            f"{conv_url}/events",
+            headers=rh,
+            timeout=30,
+            json=payload,
+        )
+        if r.status_code < 300:
+            print(f"  runtime events OK: {r.text[:200]}")
+            try:
+                rr = requests.post(
+                    f"{conv_url}/run",
+                    headers=rh,
+                    timeout=15,
+                )
+                print(f"  runtime run -> {rr.status_code}")
+            except Exception:
+                pass
+            return True
+        print(f"  runtime events -> {r.status_code}: {r.text[:200]}")
+        return False
+    except Exception as exc:
+        print(f"  runtime fallback virhe: {exc}")
+        return False
+
+
 def start_conversation(base_url, headers, repository, text, dry_run, poll_attempts=12):
     """Start a replacement conversation through the OpenHands V1 API.
 
