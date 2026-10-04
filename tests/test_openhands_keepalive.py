@@ -118,5 +118,92 @@ class RepositorySelectionTests(unittest.TestCase):
         self.assertEqual(reusable, "older")
 
 
+
+class NudgeRecoveryTests(unittest.TestCase):
+    def _args(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            dry_run=False,
+            nudge="continue",
+            nudge_mode="loop",
+            no_done_check=True,
+            resume_cooldown=900,
+            idle_timeout=900,
+        )
+
+    def test_send_nudge_function_exists_and_supports_dry_run(self):
+        self.assertTrue(callable(MODULE.send_nudge))
+        self.assertTrue(
+            MODULE.send_nudge(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                "continue",
+                True,
+            )
+        )
+
+    def test_sandbox_error_still_gets_nudged(self):
+        original_get = MODULE.get_conversation
+        original_activity = MODULE.latest_activity_ts
+        original_nudge = MODULE.send_nudge
+        try:
+            MODULE.get_conversation = lambda *args: {
+                "sandbox_status": "ERROR",
+                "execution_status": "error",
+                "updated_at": "2026-10-01T10:00:00Z",
+                "title": "failed agent",
+                "sandbox_id": "sandbox-1",
+            }
+            MODULE.latest_activity_ts = lambda *args: 0.0
+            calls = []
+            MODULE.send_nudge = lambda *args: calls.append(args) or True
+
+            outcome = MODULE.check_conversation(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                self._args(),
+                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+            )
+
+            self.assertEqual(outcome, "nudged")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][2], "conversation-1")
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.latest_activity_ts = original_activity
+            MODULE.send_nudge = original_nudge
+
+    def test_sandbox_missing_does_not_nudge(self):
+        original_get = MODULE.get_conversation
+        original_events = MODULE.fetch_recent_events
+        original_nudge = MODULE.send_nudge
+        try:
+            MODULE.get_conversation = lambda *args: {
+                "sandbox_status": "MISSING",
+                "execution_status": "error",
+            }
+            MODULE.fetch_recent_events = lambda *args, **kwargs: []
+            def fail_nudge(*args, **kwargs):
+                self.fail("MISSING sandbox must not receive a nudge")
+            MODULE.send_nudge = fail_nudge
+
+            outcome = MODULE.check_conversation(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                self._args(),
+                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+            )
+
+            self.assertEqual(outcome, "sandbox-missing")
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.fetch_recent_events = original_events
+            MODULE.send_nudge = original_nudge
+
+
+
 if __name__ == "__main__":
     unittest.main()
