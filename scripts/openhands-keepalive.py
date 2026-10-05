@@ -334,6 +334,30 @@ def try_resume(base_url, headers, sandbox_id, dry_run):
 
 
 
+def wait_for_resumed_sandbox(base_url, headers, conversation_id, sandbox_id, timeout=90, interval=5):
+    """Wait for a resumed sandbox to become RUNNING before using the conversation."""
+    deadline = time.time() + timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            conversation = get_conversation(base_url, headers, conversation_id)
+        except ConversationNotFound:
+            print(f"  resume wait: conversation {conversation_id[:8]} disappeared")
+            return False
+
+        sandbox_status = conversation.get("sandbox_status")
+        print(f"  resume poll {attempt}: sandbox={sandbox_status}")
+        if sandbox_status == "RUNNING":
+            return True
+        if sandbox_status == "MISSING":
+            return False
+        if time.time() >= deadline:
+            print(f"  resume wait timeout after {timeout}s (sandbox={sandbox_status})")
+            return False
+        time.sleep(interval)
+
+
 def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=None):
     """Send a user nudge to an existing conversation, with runtime fallback."""
     if dry_run:
@@ -661,6 +685,20 @@ def recover_repository_after_loss(
             f"  fallback: canonical menetetty -> kokeillaan vanhempaa "
             f"conversationia {cid[:8]} repo={repository}"
         )
+        if candidate.get("sandbox_status") == "PAUSED":
+            # This path is reached specifically because the canonical
+            # conversation lost its sandbox. Resume the older conversation,
+            # then wait for STARTING -> RUNNING before attempting a nudge.
+            # Without this wait OpenHands can return 409 while the sandbox is
+            # still starting, causing a false recovery failure.
+            sandbox_id = candidate.get("sandbox_id") or ""
+            if not try_resume(base_url, headers, sandbox_id, args.dry_run):
+                continue
+            if not args.dry_run and not wait_for_resumed_sandbox(
+                base_url, headers, cid, sandbox_id
+            ):
+                continue
+
         outcome = check_conversation(base_url, headers, cid, args, state)
         if outcome in ("sandbox-missing", "not-found"):
             continue

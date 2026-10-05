@@ -265,6 +265,36 @@ class NudgeRecoveryTests(unittest.TestCase):
             MODULE.fetch_recent_events = original_events
             MODULE.send_nudge = original_nudge
 
+    def test_missing_sandbox_fallback_waits_for_resumed_paused_conversation(self):
+        original_resume = MODULE.try_resume
+        original_wait = MODULE.wait_for_resumed_sandbox
+        original_check = MODULE.check_conversation
+        try:
+            calls = []
+            MODULE.try_resume = lambda *args: calls.append("resume") or True
+            MODULE.wait_for_resumed_sandbox = lambda *args: calls.append("wait") or True
+            MODULE.check_conversation = lambda *args: calls.append("check") or "nudged"
+
+            from types import SimpleNamespace
+            args = SimpleNamespace(dry_run=False, discover_limit=50, nudge="continue")
+            state = {"nudges": {}, "last_resume": {}, "new_conversations": set()}
+            candidates = [
+                {"id": "canonical", "sandbox_status": "MISSING"},
+                {"id": "older", "sandbox_status": "PAUSED", "sandbox_id": "sandbox-older"},
+            ]
+
+            cid, outcome = MODULE.recover_repository_after_loss(
+                "https://app.all-hands.dev", {}, "akukuusisto/battleweave",
+                candidates, args, state,
+            )
+
+            self.assertEqual(cid, "older")
+            self.assertEqual(outcome, "nudged")
+            self.assertEqual(calls, ["resume", "wait", "check"])
+        finally:
+            MODULE.try_resume = original_resume
+            MODULE.wait_for_resumed_sandbox = original_wait
+            MODULE.check_conversation = original_check
 
 if __name__ == "__main__":
     unittest.main()
