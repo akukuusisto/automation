@@ -1011,6 +1011,9 @@ def check_conversation(base_url, headers, conv_id, args, state):
             pass
 
         if sandbox_status == "PAUSED":
+            # Jos resume vahvistetaan tällä kierroksella RUNNING-tilaan, nudge
+            # saa lähteä heti: outcome on silloin "resumed->nudged".
+            resume_prefix = ""
             last_resume = state["last_resume"].get(conv_id, 0.0)
             if now - last_resume >= args.resume_cooldown:
                 print("  Sandbox PAUSED -> resume...")
@@ -1024,7 +1027,8 @@ def check_conversation(base_url, headers, conv_id, args, state):
                     return "paused"
                 if dry_run:
                     print("  DRY-RUN: sandboxin palautumista ei odotettu")
-                elif not wait_for_resumed_sandbox(
+                    return "resumed"
+                if not wait_for_resumed_sandbox(
                     base_url,
                     headers,
                     conv_id,
@@ -1037,10 +1041,22 @@ def check_conversation(base_url, headers, conv_id, args, state):
                         "odotetaan seuraavaa keepalive-kierrosta"
                     )
                     return "resuming"
-                # Resume on asynkroninen. Nudgea ei lähetetä samalla
-                # kierroksella vanhan PAUSED-tilan perusteella: seuraava
-                # keepalive-kierros arvioi tuoreen execution-tilan.
-                return "resumed"
+                # Sandbox on nyt vahvistettu RUNNING-tilaan, joten send-message
+                # ei enää palauta 409:ää ja nudge voidaan lähettää heti.
+                # Tämä on tarpeen siksi, että resume nollaa activity-aikaleiman:
+                # ilman tätä herätetty conversation näyttää "juuri aktiiviselta"
+                # ja odottaisi nudgea turhaan koko nudge-rajan (30 min) verran.
+                if idle_for is not None and idle_for < nudge_after:
+                    print(
+                        f"  Resume valmis, mutta idle {idle_for}s < "
+                        f"{nudge_after}s -> nudge jää seuraavalle kierrokselle"
+                    )
+                    return "resumed"
+                print(
+                    "  Resume valmis ja idle-raja ylitetty -> "
+                    "nudge samalla kierroksella"
+                )
+                resume_prefix = "resumed->"
 
             if idle_for is None:
                 print(
@@ -1053,18 +1069,18 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 if not args.no_done_check:
                     recent = fetch_recent_events(base_url, headers, conv_id)
                     if recent is not None and is_stop_message(recent, args.nudge_mode):
-                        return "done"
+                        return resume_prefix + "done"
                     if count_trailing_user_messages(recent) >= args.max_stalled_nudges:
                         print(
                             "  PAUSED: agentti ei vastaa nudgeihin -> "
                             "conversation on jumissa, vaaditaan palautus."
                         )
-                        return "stalled"
+                        return resume_prefix + "stalled"
                 if send_nudge(base_url, headers, conv_id, args.nudge, dry_run, conversation):
                     state["nudges"][conv_id] = nudges + 1
-                    return "dry-nudge" if dry_run else "nudged"
-                return "nudge-failed"
-            return "paused"
+                    return resume_prefix + ("dry-nudge" if dry_run else "nudged")
+                return resume_prefix + "nudge-failed"
+            return resume_prefix + "paused"
 
         if sandbox_status == "STARTING":
             return "starting"

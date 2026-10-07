@@ -26,7 +26,7 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 |---------|-----------|--------|
 | `RUNNING` | `running` | Leave alone |
 | `RUNNING` / `ERROR` | `finished` / `idle` / `stuck` / `error` / unknown | Nudge once idle passes the threshold |
-| `PAUSED` | any | Resume (cooldown), wait for `RUNNING`, never nudge in the same pass |
+| `PAUSED` | any | Resume (cooldown); after it is confirmed `RUNNING`, nudge in the same pass if the conversation was already past the idle threshold |
 | `MISSING` | any | Loss recovery (older conversation, or a new one) |
 | any | agent stopped in `task` mode with exactly `DONE` | Stop managing that conversation |
 
@@ -110,10 +110,18 @@ conversation still prints the short conversation id, so they stay distinguishabl
 `RUNNING`, and OpenHands rejects `send-message` with HTTP 409 while it is not
 ready. Therefore:
 
-- after sending a resume, the keepalive does **not** nudge in the same pass — the
-  next pass evaluates the fresh state;
-- a recovery path that resumes an older conversation waits for `RUNNING` before
-  using it (see `wait_for_resumed_sandbox`).
+- a resume waits for `RUNNING` before the conversation is used again (see
+  `wait_for_resumed_sandbox`), otherwise `send-message` would answer 409. This
+  applies both to the canonical conversation and to a recovery path that resumes
+  an older one;
+- once the sandbox is confirmed `RUNNING`, a conversation that was **already past
+  the idle threshold** is nudged in the same pass, reported as
+  `resumed->nudged`. This matters because resuming resets the activity timestamp:
+  without the immediate nudge, a conversation woken after hours of `PAUSED` would
+  look "just active" and then wait a whole nudge interval (30 min) before it was
+  ever asked to work again;
+- a conversation that was *not* past the threshold is only resumed, reported as
+  `resumed`, and the next pass decides whether a nudge is due.
 
 ## Message delivery
 
