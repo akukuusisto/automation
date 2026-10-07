@@ -1,10 +1,16 @@
 name: openhands-keepalive
 
-# Keeps OpenHands agents alive with exactly one canonical conversation per repository.
-# The newest conversation for a repository is the only one checked normally.
-# Older same-repository conversations are considered only after that canonical
-# conversation's sandbox is truly gone (MISSING/not found).
-# A new conversation is created only when no reusable older conversation exists.
+# Pitää OpenHands-agentit käynnissä: täsmälleen yksi kanoninen conversation per
+# repositorio. Kanoninen on uusin conversation, jolla on vielä sandbox. Vasta kun
+# kaikki sandboxit ovat MISSING, käytetään vanhempaa conversationia tai luodaan uusi.
+#
+# Loop-moodissa ei ole lopetustokenia: agentti ei voi pysäyttää looppia. Kun työt
+# loppuvat, se tutkii itse tärkeäksi kokemansa aiheen ja avaa tuloksista PR:n, jota
+# se ei mergaa vaan jättää ihmisen arvioitavaksi.
+#
+# Ajastus: GitHubin oma schedule on epäluotettava, joten suurin osa ajoista tulee
+# ulkoisesta dispatchistä (cron-job.org). keepalive-deadman.yml hälyttää, jos ajoja
+# ei tule lainkaan.
 #
 # Secrets (Settings -> Secrets and variables -> Actions):
 #   OPENHANDS_API_KEY            required
@@ -15,8 +21,18 @@ name: openhands-keepalive
 # External cron example (workflow_dispatch):
 #   POST /repos/<owner>/automation/actions/workflows/openhands-keepalive.yml/dispatches
 #   {"ref":"main","inputs":{"dry-run":"false","discover":"true"}}
+#
+# HUOM: repositorio on julkinen, joten Actions-logit ja step summaryt ovat julkisia.
+# Skripti peittää repositorioiden nimet, conversation-titlet ja täydet UUID:t
+# oletuksena; OPENHANDS_VERBOSE=1 on tarkoitettu vain paikalliseen ajoon.
 
 on:
+  # PR- ja push-ajot vain validoivat koodin (testit). Ne eivät koske oikeisiin
+  # conversationeihin, joten yksikään PR ei voi tönäistä tuotannon agentteja.
+  push:
+    branches:
+      - main
+  pull_request:
   schedule:
     - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
@@ -37,14 +53,12 @@ run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }}, discover
 permissions:
   contents: read
 
-concurrency:
-  group: openhands-keepalive
-  cancel-in-progress: false
-
 jobs:
-  keepalive:
+  # Validoi koodi kaikilla triggereillä (myös PR:issä). Ei salaisuuksia, ei
+  # verkkoliikennettä. Tämä on ainoa paikka, jossa testit ajetaan.
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -58,6 +72,25 @@ jobs:
           python3 -c "import requests" 2>/dev/null || pip install --quiet requests
       - name: Run keepalive tests
         run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+  keepalive:
+    # Vain ajastettu tai käsin käynnistetty ajo saa tönäistä oikeita
+    # conversationeita. PR- ja push-ajot eivät koske niihin.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Päällekkäiset ajot jonottavat peräkkäin, eivät koskaan rinnakkain.
+    # Concurrency on tässä jobissa (ei koko workflow'ssa), jotta PR-ajot eivät
+    # jonota oikeita keepalive-ajoja.
+    concurrency:
+      group: openhands-keepalive
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Run keepalive check (once)
         shell: bash
         env:
@@ -68,6 +101,20 @@ jobs:
           OPENHANDS_NUDGE_MODE: "loop"
           OPENHANDS_IDLE_TIMEOUT: "900"
           OPENHANDS_RESUME_COOLDOWN: "900"
+          # Nudgea ei lähetetä samalle conversationille tätä tiheämmin. Tämä
+          # estää sen, että jumissa oleva conversation saisi nuden joka ajolla.
+          OPENHANDS_MIN_NUDGE_INTERVAL: "1800"
+          # Neljän vastaamattoman nuden jälkeen conversation todetaan jumiin
+          # jääneeksi ja se korvataan.
+          OPENHANDS_MAX_STALLED_NUDGES: "4"
+          # Aikabudjetti: yhteenveto ehtii syntyä ennen jobin timeoutia.
+          OPENHANDS_RUN_BUDGET_SECONDS: "420"
+          # Aseta "true", jos haluat että ajo epäonnistuu kun jokin conversation
+          # tarvitsee ihmisen (waiting_for_confirmation).
+          OPENHANDS_FAIL_ON_ATTENTION: "false"
+          # Pidä conversation-otsikot muodossa "owner/repo: ...", jotta UI:sta
+          # näkee yhdellä silmäyksellä mikä repo on työstössä.
+          OPENHANDS_TITLE_SYNC: "true"
           # Resume on asynkroninen: odota enintaan 30 s (3 s välein) että sandbox
           # ehtii RUNNING-tilaan ennen kuin conversationia käytetään uudelleen.
           OPENHANDS_RESUME_WAIT_SECONDS: "30"
