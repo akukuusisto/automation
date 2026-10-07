@@ -329,6 +329,7 @@ def keepalive_args(**overrides):
         run_budget=420,
         fail_on_attention=False,
         verbose=False,
+        title_sync=True,
         discover_limit=50,
     )
     values.update(overrides)
@@ -849,6 +850,104 @@ class SendNudgeFallbackTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class ArchivedConversationTests(unittest.TestCase):
+    """Arkistoitu conversation (HTTP 410/404) on menetetty, ei tilap\u00e4inen virhe.
+
+    OpenHands vastaa arkistoituun conversationiin
+    {"detail": "Conversation is archived. The sandbox no longer exists."}
+    eik\u00e4 nudge voi koskaan menn\u00e4 l\u00e4pi. Repositorio pit\u00e4\u00e4 saada uusi
+    conversation sen sijaan ett\u00e4 se j\u00e4isi ikuisesti kuolleeksi.
+    """
+
+    conversation = {
+        "conversation_url": "",
+        "session_api_key": "",
+        "sandbox_status": "ERROR",
+        "execution_status": None,
+        "updated_at": "2026-10-01T10:00:00Z",
+        "title": "archived agent",
+        "sandbox_id": "sandbox-1",
+    }
+
+    def _send_with(self, status_code):
+        original = MODULE.requests
+        fake = _NudgeRequests(status_code)
+        MODULE.requests = fake
+        try:
+            with self.assertRaises(MODULE.ConversationNotFound):
+                MODULE.send_nudge(
+                    "https://app.all-hands.dev",
+                    {},
+                    "conversation-1",
+                    "text",
+                    False,
+                    self.conversation,
+                )
+        finally:
+            MODULE.requests = original
+        return fake
+
+    def test_archived_conversation_is_reported_as_gone(self):
+        fake = self._send_with(410)
+        # Arkistoituun conversationiin ei yritet\u00e4 runtime-fallbackia.
+        self.assertFalse(any(url.endswith("/events") for url in fake.urls))
+
+    def test_deleted_conversation_is_reported_as_gone(self):
+        self._send_with(404)
+
+    def test_a_starting_sandbox_is_still_a_transient_failure(self):
+        # 409 ei ole menetetty conversation: nudgea yritet\u00e4\u00e4n runtime-API:n kautta.
+        original = MODULE.requests
+        fake = _NudgeRequests(409)
+        MODULE.requests = fake
+        try:
+            conversation = dict(self.conversation)
+            conversation["conversation_url"] = "https://runtime.example/api"
+            conversation["session_api_key"] = "session-key"
+            ok = MODULE.send_nudge(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                "text",
+                False,
+                conversation,
+            )
+        finally:
+            MODULE.requests = original
+        self.assertTrue(ok)
+
+    def test_check_conversation_turns_a_gone_conversation_into_recovery(self):
+        original_get = MODULE.get_conversation
+        original_activity = MODULE.latest_activity_ts
+        original_events = MODULE.fetch_recent_events
+        original_nudge = MODULE.send_nudge
+        try:
+            MODULE.get_conversation = lambda *a, **k: dict(self.conversation)
+            MODULE.latest_activity_ts = lambda *a: MODULE.time.time() - 3600
+            MODULE.fetch_recent_events = lambda *a, **k: []
+
+            def raise_gone(*a, **k):
+                raise MODULE.ConversationNotFound("conversation-1")
+
+            MODULE.send_nudge = raise_gone
+            outcome = MODULE.check_conversation(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                keepalive_args(),
+                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+            )
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.latest_activity_ts = original_activity
+            MODULE.fetch_recent_events = original_events
+            MODULE.send_nudge = original_nudge
+        # "not-found" kuuluu palautettaviin outcomeihin, joten main() korvaa
+        # conversationin uudella sen sijaan ett\u00e4 repo j\u00e4isi kuolleeksi.
+        self.assertEqual(outcome, "not-found")
+        self.assertTrue(MODULE.outcome_matches(outcome, MODULE.RECOVERY_OUTCOMES))
+
+
 class _TitleRequests:
     """Tallentaa PATCH-payloadit otsikon synkronointia varten."""
 
@@ -865,20 +964,38 @@ class _TitleRequests:
 
 
 class TitleSyncTests(unittest.TestCase):
-    """Jokainen hallittu conversation nimetään repositorion nimellä."""
+    """Jokainen hallittu conversation nimetään repositorion nimellä.
 
-    def test_desired_title_prefixes_the_repository(self):
+    Omistaja ("akukuusisto/") jätetään pois, koska se on UI:ssa pelkkää
+    kohinaa: otsikko alkaa aina pelkällä repositorion nimellä.
+    """
+
+    def test_desired_title_prefixes_the_repository_without_the_owner(self):
         self.assertEqual(
             MODULE.desired_conversation_title(
                 "BuildHorizon", "org/build-horizon-pilot"
             ),
-            "org/build-horizon-pilot: BuildHorizon",
+            "build-horizon-pilot: BuildHorizon",
+        )
+
+    def test_desired_title_never_contains_the_owner(self):
+        title = MODULE.desired_conversation_title("agent", "akukuusisto/toolbox")
+        self.assertEqual(title, "toolbox: agent")
+        self.assertNotIn("/", title)
+
+    def test_legacy_title_with_owner_is_migrated(self):
+        # Vanha "owner/repo: ..." -otsikko siivotaan kertaalleen puhtaaksi.
+        self.assertEqual(
+            MODULE.desired_conversation_title(
+                "org/toolbox: jatka looppia", "org/toolbox"
+            ),
+            "toolbox: jatka looppia",
         )
 
     def test_desired_title_is_none_when_already_prefixed(self):
         self.assertIsNone(
             MODULE.desired_conversation_title(
-                "org/toolbox: jatka looppia", "org/toolbox"
+                "toolbox: jatka looppia", "org/toolbox"
             )
         )
 
@@ -887,13 +1004,13 @@ class TitleSyncTests(unittest.TestCase):
             MODULE.desired_conversation_title(
                 "\U0001f527 Toolbox: Continue the loop", "org/toolbox"
             ),
-            "org/toolbox: Continue the loop",
+            "toolbox: Continue the loop",
         )
 
     def test_desired_title_uses_default_suffix_for_empty_title(self):
         self.assertEqual(
             MODULE.desired_conversation_title("", "org/toolbox"),
-            "org/toolbox: keepalive",
+            "toolbox: keepalive",
         )
 
     def test_desired_title_is_none_without_repository(self):
@@ -917,14 +1034,14 @@ class TitleSyncTests(unittest.TestCase):
             MODULE.requests = original
 
     def test_sync_skips_the_api_when_the_title_is_already_fine(self):
-        changed, payloads = self._sync("org/toolbox: keepalive")
+        changed, payloads = self._sync("toolbox: keepalive")
         self.assertFalse(changed)
         self.assertEqual(payloads, [])
 
     def test_sync_patches_only_the_title_field(self):
         changed, payloads = self._sync("Toolbox: jatka looppia")
         self.assertTrue(changed)
-        self.assertEqual(payloads, [{"title": "org/toolbox: jatka looppia"}])
+        self.assertEqual(payloads, [{"title": "toolbox: jatka looppia"}])
 
     def test_sync_writes_nothing_in_dry_run(self):
         changed, payloads = self._sync(
@@ -945,7 +1062,7 @@ class TitleSyncTests(unittest.TestCase):
             "Toolbox: jatka looppia", fake=_TitleRequests(status_code=403)
         )
         self.assertFalse(changed)
-        self.assertEqual(payloads, [{"title": "org/toolbox: jatka looppia"}])
+        self.assertEqual(payloads, [{"title": "toolbox: jatka looppia"}])
 
     def test_sync_survives_a_network_error(self):
         changed, _ = self._sync(
@@ -981,8 +1098,9 @@ class TitleSyncTests(unittest.TestCase):
             MODULE.latest_activity_ts = original_activity
             MODULE.requests = original_requests
         self.assertEqual(outcome, "running")
-        # repo-nimi siivotaan pois otsikon alusta, ettei se toistu
-        self.assertEqual(fake.payloads, [{"title": "org/toolbox: loop"}])
+        # repo-nimi siivotaan pois otsikon alusta, ettei se toistu, eikä
+        # omistajaa koskaan kirjoiteta otsikkoon.
+        self.assertEqual(fake.payloads, [{"title": "toolbox: loop"}])
 
 
 class ResumeRecoveryTests(unittest.TestCase):
