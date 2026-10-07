@@ -1332,7 +1332,10 @@ def main():
         # the same repository during the same run.
         for cid in list(active):
             outcome = check_conversation(base_url, headers, cid, args, state)
-            if outcome in ("done", "sandbox-missing", "not-found"):
+            # Sama terminaalilogiikka kuin --once-ajossa: my\u00f6s stalled ja
+            # budget-exhausted poistuvat seurannasta sen sijaan ett\u00e4 niit\u00e4
+            # t\u00f6n\u00e4ist\u00e4isiin loputtomiin.
+            if outcome_matches(outcome, TERMINAL_OUTCOMES + ("sandbox-missing", "not-found")):
                 active.remove(cid)
         if not active:
             break
