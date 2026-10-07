@@ -16,7 +16,7 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 |---------|-----------|--------|
 | `RUNNING` | `running` | Leave alone |
 | `RUNNING` / `ERROR` | `finished` / `idle` / `stuck` / `error` | Nudge after idle timeout |
-| `PAUSED` | any | Resume (cooldown), then nudge if still idle |
+| `PAUSED` | any | Resume (cooldown), wait for `RUNNING`, never nudge in the same pass |
 | `MISSING` | any | Fallback to older conversation or start a new one |
 | any | agent replied `LOOP-STOP` (loop mode) or `DONE` (task mode) | Stop managing that conversation |
 
@@ -45,3 +45,33 @@ Default nudge text instructs the agent to:
 - Schedule runs about every 15 minutes (GitHub cron is a backup; external dispatch is preferred for reliability).
 - `workflow_dispatch` inputs: `dry-run`, `discover`.
 - Unit tests run before the live check; a failing test blocks nudges for that run.
+- `OPENHANDS_RESUME_WAIT_SECONDS` (default `90`) and `OPENHANDS_RESUME_POLL_INTERVAL`
+  (default `5`) control how long a resumed sandbox is given to reach `RUNNING`.
+
+## Resume is asynchronous
+
+`PAUSED -> resume` does not make a sandbox usable immediately: it reports
+`STARTING` first, and OpenHands rejects `send-message` with HTTP 409 until the
+sandbox is `RUNNING`. The keepalive therefore never nudges in the same pass in
+which it sent a resume. It waits up to `OPENHANDS_RESUME_WAIT_SECONDS` for
+`RUNNING`; if the sandbox is not ready in time the conversation is reported as
+`resuming` and the next keepalive check evaluates the fresh state. The same wait
+applies when an older conversation is resumed during loss recovery.
+
+## Incident log
+
+### 2026-10-04 — transient sandbox loss during keepalive
+
+- Keepalive saw a canonical conversation as `sandbox=MISSING`.
+- Recovery selected an older same-repository conversation whose sandbox was `PAUSED`.
+- `POST .../resume` returned HTTP 200, but the sandbox was still starting.
+- The immediate `send-message` then failed with HTTP 409 (`Sandbox is STARTING`).
+- The conversation recovered on its own; the next keepalive run reported every
+  managed repository as `RUNNING` again.
+
+Conclusion: `MISSING` / `PAUSED -> STARTING` can be a transient recovery state. A
+resume that has not become ready yet must not be treated as permanent sandbox
+loss, and a nudge must never be sent in the same pass as a resume.
+
+Repository names and conversation identifiers are intentionally not recorded here:
+this repository is public.
