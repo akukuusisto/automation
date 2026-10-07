@@ -27,6 +27,12 @@ name: openhands-keepalive
 # oletuksena; OPENHANDS_VERBOSE=1 on tarkoitettu vain paikalliseen ajoon.
 
 on:
+  # PR- ja push-ajot vain validoivat koodin (testit). Ne eivät koske oikeisiin
+  # conversationeihin, joten yksikään PR ei voi tönäistä tuotannon agentteja.
+  push:
+    branches:
+      - main
+  pull_request:
   schedule:
     - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
@@ -47,14 +53,12 @@ run-name: "OpenHands keepalive (dry-run=${{ inputs.dry-run || false }}, discover
 permissions:
   contents: read
 
-concurrency:
-  group: openhands-keepalive
-  cancel-in-progress: false
-
 jobs:
-  keepalive:
+  # Validoi koodi kaikilla triggereillä (myös PR:issä). Ei salaisuuksia, ei
+  # verkkoliikennettä. Tämä on ainoa paikka, jossa testit ajetaan.
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -68,6 +72,25 @@ jobs:
           python3 -c "import requests" 2>/dev/null || pip install --quiet requests
       - name: Run keepalive tests
         run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+  keepalive:
+    # Vain ajastettu tai käsin käynnistetty ajo saa tönäistä oikeita
+    # conversationeita. PR- ja push-ajot eivät koske niihin.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Päällekkäiset ajot jonottavat peräkkäin, eivät koskaan rinnakkain.
+    # Concurrency on tässä jobissa (ei koko workflow'ssa), jotta PR-ajot eivät
+    # jonota oikeita keepalive-ajoja.
+    concurrency:
+      group: openhands-keepalive
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Run keepalive check (once)
         shell: bash
         env:
