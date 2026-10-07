@@ -1,10 +1,16 @@
 name: openhands-keepalive
 
-# Keeps OpenHands agents alive with exactly one canonical conversation per repository.
-# The newest conversation for a repository is the only one checked normally.
-# Older same-repository conversations are considered only after that canonical
-# conversation's sandbox is truly gone (MISSING/not found).
-# A new conversation is created only when no reusable older conversation exists.
+# Pitää OpenHands-agentit käynnissä: täsmälleen yksi kanoninen conversation per
+# repositorio. Kanoninen on uusin conversation, jolla on vielä sandbox. Vasta kun
+# kaikki sandboxit ovat MISSING, käytetään vanhempaa conversationia tai luodaan uusi.
+#
+# Loop-moodissa ei ole lopetustokenia: agentti ei voi pysäyttää looppia. Kun työt
+# loppuvat, se tutkii itse tärkeäksi kokemansa aiheen ja avaa tuloksista PR:n, jota
+# se ei mergaa vaan jättää ihmisen arvioitavaksi.
+#
+# Ajastus: GitHubin oma schedule on epäluotettava, joten suurin osa ajoista tulee
+# ulkoisesta dispatchistä (cron-job.org). keepalive-deadman.yml hälyttää, jos ajoja
+# ei tule lainkaan.
 #
 # Secrets (Settings -> Secrets and variables -> Actions):
 #   OPENHANDS_API_KEY            required
@@ -15,6 +21,10 @@ name: openhands-keepalive
 # External cron example (workflow_dispatch):
 #   POST /repos/<owner>/automation/actions/workflows/openhands-keepalive.yml/dispatches
 #   {"ref":"main","inputs":{"dry-run":"false","discover":"true"}}
+#
+# HUOM: repositorio on julkinen, joten Actions-logit ja step summaryt ovat julkisia.
+# Skripti peittää repositorioiden nimet, conversation-titlet ja täydet UUID:t
+# oletuksena; OPENHANDS_VERBOSE=1 on tarkoitettu vain paikalliseen ajoon.
 
 on:
   schedule:
@@ -68,6 +78,17 @@ jobs:
           OPENHANDS_NUDGE_MODE: "loop"
           OPENHANDS_IDLE_TIMEOUT: "900"
           OPENHANDS_RESUME_COOLDOWN: "900"
+          # Nudgea ei lähetetä samalle conversationille tätä tiheämmin. Tämä
+          # estää sen, että jumissa oleva conversation saisi nuden joka ajolla.
+          OPENHANDS_MIN_NUDGE_INTERVAL: "1800"
+          # Neljän vastaamattoman nuden jälkeen conversation todetaan jumiin
+          # jääneeksi ja se korvataan.
+          OPENHANDS_MAX_STALLED_NUDGES: "4"
+          # Aikabudjetti: yhteenveto ehtii syntyä ennen jobin timeoutia.
+          OPENHANDS_RUN_BUDGET_SECONDS: "420"
+          # Aseta "true", jos haluat että ajo epäonnistuu kun jokin conversation
+          # tarvitsee ihmisen (waiting_for_confirmation).
+          OPENHANDS_FAIL_ON_ATTENTION: "false"
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
           # schedule -> always discover; workflow_dispatch respects the discover input
           OPENHANDS_AUTO_DISCOVER: ${{ github.event_name == 'schedule' || inputs.discover }}
