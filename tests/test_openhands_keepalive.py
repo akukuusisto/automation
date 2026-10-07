@@ -354,12 +354,28 @@ class LoopContinuityTests(unittest.TestCase):
     def test_task_mode_stops_only_on_exact_done(self):
         self.assertFalse(MODULE.is_stop_message([agent_event("DONE!")], "task"))
 
-    def test_loop_nudge_sends_exhausted_work_to_research_pull_request(self):
+    def test_loop_nudge_prefers_a_new_feature_before_research(self):
         text = MODULE.DEFAULT_NUDGE_LOOP
+        lowered = text.lower()
         self.assertNotIn("LOOP-STOP", text)
         self.assertIn("PR", text)
         self.assertIn("mergaa", text)
-        self.assertIn("Tutki", text)
+        self.assertIn("uusi feature", lowered)
+        self.assertIn("tutki se", lowered)
+        # uusi feature -ohje on ennen tutkimusohjetta
+        self.assertLess(lowered.index("uusi feature"), lowered.index("tutki se"))
+
+    def test_legacy_stop_token_is_logged_but_not_treated_as_stop(self):
+        events = [agent_event("LOOP-STOP")]
+        self.assertTrue(MODULE.latest_agent_is_stop_token(events))
+        self.assertFalse(MODULE.is_stop_message(events, "loop"))
+
+    def test_latest_agent_is_stop_token_ignores_user_messages(self):
+        events = [
+            agent_event("tyo jatkuu", timestamp="2026-10-07T10:00:00Z"),
+            user_event(timestamp="2026-10-07T10:01:00Z"),
+        ]
+        self.assertFalse(MODULE.latest_agent_is_stop_token(events))
 
     def test_trailing_user_messages_counts_unanswered_nudges(self):
         events = [
@@ -786,6 +802,142 @@ class SendNudgeFallbackTests(unittest.TestCase):
         apps = [url for url in fake.urls if url.endswith("/send-message")]
         self.assertEqual(len(apps), 2)
         self.assertTrue(ok)
+
+
+class _TitleRequests:
+    """Tallentaa PATCH-payloadit otsikon synkronointia varten."""
+
+    def __init__(self, status_code=200, error=None):
+        self.status_code = status_code
+        self.error = error
+        self.payloads = []
+
+    def patch(self, url, **kwargs):
+        if self.error:
+            raise self.error
+        self.payloads.append(kwargs.get("json"))
+        return _StubResponse(self.status_code, "ok")
+
+
+class TitleSyncTests(unittest.TestCase):
+    """Jokainen hallittu conversation nimetään repositorion nimellä."""
+
+    def test_desired_title_prefixes_the_repository(self):
+        self.assertEqual(
+            MODULE.desired_conversation_title(
+                "BuildHorizon", "org/build-horizon-pilot"
+            ),
+            "org/build-horizon-pilot: BuildHorizon",
+        )
+
+    def test_desired_title_is_none_when_already_prefixed(self):
+        self.assertIsNone(
+            MODULE.desired_conversation_title(
+                "org/toolbox: jatka looppia", "org/toolbox"
+            )
+        )
+
+    def test_desired_title_strips_emoji_and_repeated_repo_name(self):
+        self.assertEqual(
+            MODULE.desired_conversation_title(
+                "\U0001f527 Toolbox: Continue the loop", "org/toolbox"
+            ),
+            "org/toolbox: Continue the loop",
+        )
+
+    def test_desired_title_uses_default_suffix_for_empty_title(self):
+        self.assertEqual(
+            MODULE.desired_conversation_title("", "org/toolbox"),
+            "org/toolbox: keepalive",
+        )
+
+    def test_desired_title_is_none_without_repository(self):
+        self.assertIsNone(MODULE.desired_conversation_title("anything", ""))
+
+    def _sync(self, current_title, args=None, fake=None):
+        original = MODULE.requests
+        try:
+            fake = fake or _TitleRequests()
+            MODULE.requests = fake
+            changed = MODULE.sync_conversation_title(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                "org/toolbox",
+                current_title,
+                args or keepalive_args(),
+            )
+            return changed, fake.payloads
+        finally:
+            MODULE.requests = original
+
+    def test_sync_skips_the_api_when_the_title_is_already_fine(self):
+        changed, payloads = self._sync("org/toolbox: keepalive")
+        self.assertFalse(changed)
+        self.assertEqual(payloads, [])
+
+    def test_sync_patches_only_the_title_field(self):
+        changed, payloads = self._sync("Toolbox: jatka looppia")
+        self.assertTrue(changed)
+        self.assertEqual(payloads, [{"title": "org/toolbox: jatka looppia"}])
+
+    def test_sync_writes_nothing_in_dry_run(self):
+        changed, payloads = self._sync(
+            "Toolbox: jatka looppia", args=keepalive_args(dry_run=True)
+        )
+        self.assertFalse(changed)
+        self.assertEqual(payloads, [])
+
+    def test_sync_can_be_disabled(self):
+        changed, payloads = self._sync(
+            "Toolbox: jatka loppia", args=keepalive_args(title_sync=False)
+        )
+        self.assertFalse(changed)
+        self.assertEqual(payloads, [])
+
+    def test_sync_reports_failure_without_raising(self):
+        changed, payloads = self._sync(
+            "Toolbox: jatka looppia", fake=_TitleRequests(status_code=403)
+        )
+        self.assertFalse(changed)
+        self.assertEqual(payloads, [{"title": "org/toolbox: jatka looppia"}])
+
+    def test_sync_survives_a_network_error(self):
+        changed, _ = self._sync(
+            "Toolbox: jatka looppia", fake=_TitleRequests(error=RuntimeError("down"))
+        )
+        self.assertFalse(changed)
+
+    def test_check_conversation_syncs_the_title_it_manages(self):
+        original_get = MODULE.get_conversation
+        original_activity = MODULE.latest_activity_ts
+        original_requests = MODULE.requests
+        fake = _TitleRequests()
+        try:
+            MODULE.requests = fake
+            MODULE.get_conversation = lambda *a: {
+                "sandbox_status": "RUNNING",
+                "execution_status": "running",
+                "updated_at": "2026-10-07T10:00:00Z",
+                "title": "Toolbox loop",
+                "selected_repository": "org/toolbox",
+                "sandbox_id": "sandbox-1",
+            }
+            MODULE.latest_activity_ts = lambda *a: MODULE.time.time()
+            outcome = MODULE.check_conversation(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                keepalive_args(),
+                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+            )
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.latest_activity_ts = original_activity
+            MODULE.requests = original_requests
+        self.assertEqual(outcome, "running")
+        # repo-nimi siivotaan pois otsikon alusta, ettei se toistu
+        self.assertEqual(fake.payloads, [{"title": "org/toolbox: loop"}])
 
 
 if __name__ == "__main__":

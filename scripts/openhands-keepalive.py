@@ -22,6 +22,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import time
 
@@ -106,6 +107,90 @@ def label_title(title) -> str:
     return "'<redacted>'" if title else "''"
 
 
+# --- Conversation-otsikot ---------------------------------------------------
+# Jokainen hallittu conversation nimetään alkamaan repositorion nimellä, jotta
+# OpenHands UI:sta näkee yhdellä silmäyksellä mikä repo on työstössä. Tämä on
+# tarpeen myös siksi, että API:n kautta luodut conversationit saavat huonot
+# automaattiset otsikot (OpenHands issue #13125).
+TITLE_SEPARATOR = ": "
+DEFAULT_TITLE_SUFFIX = "keepalive"
+LEGACY_STOP_TOKENS = ("LOOP-STOP", "DONE")
+
+
+def repository_short_name(repository: str) -> str:
+    """"org/repo" -> "repo"."""
+    return (repository or "").rsplit("/", 1)[-1]
+
+
+def _clean_title_text(title: str, repository: str) -> str:
+    """Pudota emojit, erottimet ja toistuva repo-nimi otsikon alusta."""
+    text = (title or "").strip()
+    text = re.sub(r"^[^\w]+", "", text, flags=re.UNICODE).strip()
+    for candidate in (repository, repository_short_name(repository)):
+        if candidate and text.lower().startswith(candidate.lower()):
+            text = text[len(candidate):].lstrip(" :-\u2013\u2014").strip()
+    return text
+
+
+def desired_conversation_title(title: str, repository: str):
+    """Uusi otsikko, joka alkaa repositorion nimell\u00e4; None jos jo kunnossa.
+
+    None tarkoittaa ett\u00e4 API-kutsua ei tarvita, joten jokainen ajo ei
+    kirjoita conversationin otsikkoa uudelleen.
+    """
+    repository = (repository or "").strip()
+    if not repository:
+        return None
+    current = (title or "").strip()
+    if current.startswith(repository + TITLE_SEPARATOR):
+        return None
+    rest = _clean_title_text(current, repository)
+    if not rest:
+        rest = DEFAULT_TITLE_SUFFIX
+    return f"{repository}{TITLE_SEPARATOR}{rest}"
+
+
+def sync_conversation_title(
+    base_url, headers, conversation_id, repository, current_title, args
+):
+    """Pid\u00e4 huoli ett\u00e4 otsikko alkaa repositorion nimell\u00e4.
+
+    Palauttaa True vain jos otsikko oikeasti p\u00e4ivitettiin. Dry-runissa ei
+    koskaan kirjoiteta mit\u00e4\u00e4n.
+    """
+    if not getattr(args, "title_sync", True):
+        return False
+    desired = desired_conversation_title(current_title, repository)
+    if not desired:
+        return False
+    if args.dry_run:
+        print(
+            "  DRY-RUN: otsikko alkaisi repositorion nimell\u00e4 "
+            f"({label_conversation(conversation_id)})"
+        )
+        return False
+    try:
+        response = requests.patch(
+            f"{base_url}/api/v1/app-conversations/{conversation_id}",
+            headers=headers,
+            timeout=30,
+            json={"title": desired},
+        )
+        if response.status_code < 300:
+            # Otsikko sis\u00e4lt\u00e4\u00e4 repositorion nimen, joten sit\u00e4 ei koskaan
+            # tulosteta ilman VERBOSE-tilaa.
+            print(
+                "  otsikko synkronoitu -> "
+                f"{label_conversation(conversation_id)} "
+                f"title={label_title(desired)}"
+            )
+            return True
+        print(f"  otsikon p\u00e4ivitys -> {response.status_code}: {response.text[:200]}")
+    except Exception as exc:
+        print(f"  otsikon p\u00e4ivitys ep\u00e4onnistui: {exc}")
+    return False
+
+
 # --- Ajo-budjetti -----------------------------------------------------------
 # Vain --once-ajossa (GitHub Actions) k\u00e4yt\u00f6ss\u00e4: pit\u00e4\u00e4 huolen ett\u00e4 ajo
 # ehtii kirjoittaa yhteenvedon ennen jobin timeoutia.
@@ -135,14 +220,18 @@ DEFAULT_NUDGE_LOOP = (
     "sek\u00e4 varmista, ettei toinen agentti tee samaa ty\u00f6t\u00e4. V\u00e4lt\u00e4 duplikaatit.\n"
     "4) Jos nykyiset teht\u00e4v\u00e4t loppuvat: ota lis\u00e4\u00e4 t\u00f6it\u00e4 roadmapilta "
     "tai avoimista issueista (kun s\u00e4\u00e4nn\u00f6t sen sallivat).\n"
-    "5) Jos roadmapkin on tyhj\u00e4: valitse itse aihe, jonka koet t\u00e4rke\u00e4ksi "
-    "ja jota ei ole viel\u00e4 k\u00e4sitelty. Tutki se huolellisesti ja kirjaa "
-    "tulokset sek\u00e4 suositukset uuteen PR:\u00e4\u00e4n. \u00c4l\u00e4 mergaa sit\u00e4: "
-    "j\u00e4t\u00e4 PR ihmisen tutkittavaksi ja arvioitavaksi.\n"
-    "6) Pushaa muutokset normaalilla kadenssilla. \u00c4l\u00e4 mergaa "
-    "suojattuihin haaroihin ilman erillist\u00e4 ohjetta.\n\n"
-    "Looppi ei pys\u00e4hdy. \u00c4l\u00e4 vastaa pelk\u00e4ll\u00e4 lopetusmerkill\u00e4: jos ty\u00f6 "
-    "loppuu, siirry kohtaan 5 ja jatka tutkimus- ja kehitysty\u00f6t\u00e4."
+    "5) Jos roadmap ja issuet ovat tyhjät: aloita itse uusi feature tai "
+    "merkittävä parannus, joka vie sovellusta eteenpäin. Valitse se, mikä on "
+    "käyttäjälle arvokkain, ja perustele lyhyesti miksi.\n"
+    "6) Vasta jos sovellus on mielestäsi käytännössä valmis eikä järkevää "
+    "uutta tekemistä ole: valitse itse aihe, jonka koet tärkeäksi ja jota ei "
+    "ole vielä käsitelty, tutki se huolellisesti ja kirjaa tulokset sekä "
+    "suositukset uuteen PR:ään. Älä mergaa sitä: jätä PR ihmisen "
+    "tutkittavaksi ja arvioitavaksi.\n"
+    "7) Pushaa muutokset normaalilla kadenssilla. Älä mergaa suojattuihin "
+    "haaroihin ilman erillistä ohjetta.\n\n"
+    "Looppi ei pysähdy. Älä vastaa pelkällä lopetusmerkillä: jos nykyinen työ "
+    "loppuu, siirry kohtaan 5 ja aloita uusi feature."
 )
 
 DEFAULT_NUDGE_TASK = (
@@ -198,6 +287,12 @@ def parse_args():
         action="store_true",
         default=_env_bool("OPENHANDS_FAIL_ON_ATTENTION"),
         help="Palauta virhe jos jokin conversation vaatii ihmisen",
+    )
+    parser.add_argument(
+        "--title-sync",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("OPENHANDS_TITLE_SYNC", True),
+        help="Pid\u00e4 conversation-otsikot repositorion nimell\u00e4 alkavina",
     )
     parser.add_argument(
         "--verbose",
@@ -435,6 +530,39 @@ def _event_timestamp(event):
         return 0.0
 
 
+def sorted_messages(events):
+    """Viestit uusin ensin: timestampilla jos saatavilla, muuten lista käännettynä."""
+    messages = [
+        e for e in (events or [])
+        if isinstance(e, dict)
+        and e.get("source") in ("agent", "user")
+        and _event_text(e).strip()
+    ]
+    if not messages:
+        return []
+    if any(_event_timestamp(e) > 0 for e in messages):
+        messages.sort(key=_event_timestamp, reverse=True)
+    else:
+        messages = messages[::-1]
+    return messages
+
+
+def latest_agent_is_stop_token(events) -> bool:
+    """Onko uusin agentin viesti lopetusmerkki (LOOP-STOP / DONE)?
+
+    Loop-moodissa lopetusmerkki ei enää pysäytä valvontaa. Tämä on vain
+    näkyvyyttä varten: lokiin jää merkintä siitä että agentti ilmoitti
+    lopettavansa, jolloin se ohjataan aloittamaan uusi feature.
+    """
+    try:
+        messages = sorted_messages(events)
+        if not messages or messages[0].get("source") != "agent":
+            return False
+        return _event_text(messages[0]).strip().upper() in LEGACY_STOP_TOKENS
+    except Exception:
+        return False
+
+
 def is_stop_message(events, nudge_mode: str) -> bool:
     """Onko conversation tarkoituksella lopetettu?
 
@@ -446,13 +574,9 @@ def is_stop_message(events, nudge_mode: str) -> bool:
     if nudge_mode != "task":
         return False
     try:
-        messages = [e for e in (events or []) if isinstance(e, dict) and e.get("source") in ("agent", "user") and _event_text(e).strip()]
+        messages = sorted_messages(events)
         if not messages:
             return False
-        if any(_event_timestamp(e) > 0 for e in messages):
-            messages.sort(key=_event_timestamp, reverse=True)
-        else:
-            messages = messages[::-1]
         latest = messages[0]
         if latest.get("source") != "agent":
             return False
@@ -469,18 +593,9 @@ def count_trailing_user_messages(events) -> int:
     jumissa (agentti ei reagoi nudgeihin) ja se on aika korvata.
     """
     try:
-        messages = [
-            e for e in (events or [])
-            if isinstance(e, dict)
-            and e.get("source") in ("agent", "user")
-            and _event_text(e).strip()
-        ]
+        messages = sorted_messages(events)
         if not messages:
             return 0
-        if any(_event_timestamp(e) > 0 for e in messages):
-            messages.sort(key=_event_timestamp, reverse=True)
-        else:
-            messages = messages[::-1]
         count = 0
         for event in messages:
             if event.get("source") == "user":
@@ -668,9 +783,13 @@ def start_conversation(base_url, headers, repository, text, dry_run, poll_attemp
         print(f"  DRY-RUN: uusi conversation -> {label_repository(repository)}")
         return "DRY-RUN"
 
+    # Myös uusi conversation nimetään repositorion nimellä, jotta otsikosta
+    # näkee heti mikä repo on työstössä.
+    title = desired_conversation_title("", repository) or repository
     payload = {
         "initial_message": {"content": [{"type": "text", "text": text}]},
         "selected_repository": repository,
+        "title": title,
     }
     try:
         r = requests.post(
@@ -826,6 +945,7 @@ def check_conversation(base_url, headers, conv_id, args, state):
         execution_status = conversation.get("execution_status")
         updated_at = conversation.get("updated_at", "")
         title = conversation.get("title", "")
+        repository = conversation.get("selected_repository", "")
         sandbox_id = conversation.get("sandbox_id", "")
         now = time.time()
         updated_ts = parse_updated_at(updated_at)
@@ -839,6 +959,12 @@ def check_conversation(base_url, headers, conv_id, args, state):
         print(
             f"[{ts}] [{label_conversation(conv_id)}] sandbox={sandbox_status} "
             f"exec={execution_status} {idle_text} title={label_title(title)}"
+        )
+
+        # Otsikko kertoo mikä repo on työstössä; ei kirjoiteta mitään dry-runissa
+        # eikä silloin kun otsikko on jo kunnossa.
+        sync_conversation_title(
+            base_url, headers, conv_id, repository, title, args
         )
 
         if sandbox_status == "MISSING":
@@ -920,6 +1046,11 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 recent = fetch_recent_events(base_url, headers, conv_id)
                 if recent is not None and is_stop_message(recent, args.nudge_mode):
                     return "done"
+                if recent is not None and latest_agent_is_stop_token(recent):
+                    print(
+                        "  Viimeisin agentin viesti on lopetusmerkki -> "
+                        "ohjataan aloittamaan uusi feature."
+                    )
                 if count_trailing_user_messages(recent) >= args.max_stalled_nudges:
                     print(
                         f"  Agentti ei ole vastannut "

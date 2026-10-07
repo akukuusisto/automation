@@ -183,6 +183,8 @@ class KeepaliveEndToEndTests(unittest.TestCase):
             ("repository names are redacted from the summary",
              "org/" not in summary),
             ("titles are redacted", "'<redacted>'" in out),
+            ("title synchronisation would prefix the repository name",
+             "otsikko alkaisi" in out),
             ("full conversation UUIDs are never printed",
              "-1111-2222-3333-444444444444" not in out),
             ("summary marks needs human",

@@ -112,6 +112,9 @@ jobs:
           # Aseta "true", jos haluat että ajo epäonnistuu kun jokin conversation
           # tarvitsee ihmisen (waiting_for_confirmation).
           OPENHANDS_FAIL_ON_ATTENTION: "false"
+          # Pidä conversation-otsikot muodossa "owner/repo: ...", jotta UI:sta
+          # näkee yhdellä silmäyksellä mikä repo on työstössä.
+          OPENHANDS_TITLE_SYNC: "true"
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
           # schedule -> always discover; workflow_dispatch respects the discover input
           OPENHANDS_AUTO_DISCOVER: ${{ github.event_name == 'schedule' || inputs.discover }}

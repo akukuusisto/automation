@@ -35,15 +35,24 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 In `loop` mode there is **no stop token**. An agent cannot end the loop by
 replying with a single word, so a conversation can no longer die silently.
 
-When the agent runs out of ordinary work, the nudge instructs it to:
+When the agent runs out of ordinary work, the nudge gives it a ladder:
 
-1. pick a topic **it considers genuinely important** and not yet covered,
-2. research it thoroughly,
-3. open a new pull request with the findings and recommendations, and
-4. **not merge it** — the PR is left for a human to review.
+1. continue the work that is already in progress,
+2. take the next item from the roadmap or the open issues,
+3. otherwise start a **new feature or meaningful improvement** that moves the
+   product forward, choosing the most valuable one and saying briefly why,
+4. and only when the application is, in the agent's judgement, essentially
+   complete: pick a topic **it considers genuinely important** and not yet
+   covered, research it thoroughly, open a pull request with the findings and
+   recommendations, and **not merge it** — the PR is left for a human to review.
 
 `DONE` still stops a conversation in `task` mode, where a conversation represents
 one bounded task.
+
+A legacy stop token (`LOOP-STOP` or `DONE`) in the last agent message is logged as
+`Viimeisin agentin viesti on lopetusmerkki -> ohjataan aloittamaan uusi feature`
+and is otherwise ignored: it no longer retires the conversation, it just tells the
+agent to move on to rung 3 of the ladder.
 
 ### Idle measurement and nudge rate
 
@@ -68,6 +77,27 @@ the agent is in a recoverable non-running state (`ERROR`, `PAUSED`, `finished`,
 `idle`, `stuck`, `error`), the conversation is treated as **past the threshold**
 and still nudged. This prevents agents from getting stuck as `idle-unknown`.
 The check is applied to every recoverable sandbox state, including `PAUSED`.
+
+## Conversation titles
+
+Every managed conversation is titled so that it **starts with the repository
+name** (`owner/repo: ...`). The OpenHands UI lists titles, and conversations
+created through the API otherwise get poor automatic titles (OpenHands issue
+#13125), which made it hard to see at a glance which repository a conversation is
+working on.
+
+- New conversations are created with that title directly.
+- Existing conversations are renamed with `PATCH /api/v1/app-conversations/{id}`
+  sending **only** the `title` field — never `public`, `selected_repository` or
+  `selected_branch`, so nothing else is touched.
+- A rename happens only when the title does not already start with the repository
+  name, so a run does not keep rewriting titles.
+- A repeated repository name and leading emoji are stripped from the rest of the
+  title: `🔧 Toolbox: Continue the loop` becomes `org/toolbox: Continue the loop`.
+- The sync is skipped in `--dry-run` and can be disabled with
+  `OPENHANDS_TITLE_SYNC=false`.
+- Because a title contains the repository name, titles are redacted in logs and in
+  the step summary unless `OPENHANDS_VERBOSE=1` is set.
 
 ## Resume handling
 
@@ -137,6 +167,7 @@ script redacts repository names (`repo#1`, `repo#2`, ...), conversation titles
 | `OPENHANDS_RESUME_COOLDOWN` | `900` | how often a `PAUSED` resume may be retried |
 | `OPENHANDS_RUN_BUDGET_SECONDS` | `420` | wall-clock budget for one `--once` run (`0` disables) |
 | `OPENHANDS_FAIL_ON_ATTENTION` | `false` | fail the run when a conversation needs a human |
+| `OPENHANDS_TITLE_SYNC` | `true` | keep conversation titles starting with the repository name |
 | `OPENHANDS_VERBOSE` | `false` | local only: disable redaction |
 | `OPENHANDS_AUTO_DISCOVER` | `false` | discover conversations instead of using seeds |
 
