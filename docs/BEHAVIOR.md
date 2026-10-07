@@ -80,20 +80,25 @@ The check is applied to every recoverable sandbox state, including `PAUSED`.
 
 ## Conversation titles
 
-Every managed conversation is titled so that it **starts with the repository
-name** (`owner/repo: ...`). The OpenHands UI lists titles, and conversations
-created through the API otherwise get poor automatic titles (OpenHands issue
-#13125), which made it hard to see at a glance which repository a conversation is
-working on.
+Every managed conversation is titled so that it **starts with the repository name**
+(`repo: ...`). The OpenHands UI lists titles, and conversations created through the
+API otherwise get poor automatic titles (OpenHands issue #13125), which made it
+hard to see at a glance which repository a conversation is working on.
+
+The owner is dropped, because it is the same for every repository and only adds
+noise: `akukuusisto/toolbox` becomes `toolbox: ...`. If two owners ever contained a
+repository with the same name, their titles would collide — the log line for each
+conversation still prints the short conversation id, so they stay distinguishable.
 
 - New conversations are created with that title directly.
 - Existing conversations are renamed with `PATCH /api/v1/app-conversations/{id}`
   sending **only** the `title` field — never `public`, `selected_repository` or
   `selected_branch`, so nothing else is touched.
 - A rename happens only when the title does not already start with the repository
-  name, so a run does not keep rewriting titles.
+  name, so a run does not keep rewriting titles. Titles written by an older version
+  as `owner/repo: ...` are migrated once to `repo: ...`.
 - A repeated repository name and leading emoji are stripped from the rest of the
-  title: `🔧 Toolbox: Continue the loop` becomes `org/toolbox: Continue the loop`.
+  title: `🔧 Toolbox: Continue the loop` becomes `toolbox: Continue the loop`.
 - The sync is skipped in `--dry-run` and can be disabled with
   `OPENHANDS_TITLE_SYNC=false`.
 - Because a title contains the repository name, titles are redacted in logs and in
@@ -114,8 +119,15 @@ ready. Therefore:
 
 1. Prefer the app `send-message` endpoint.
 2. Fall back to runtime `/events` + `/run` with the session key when the app
-   endpoint fails — including HTTP 409/410 (sandbox not ready).
+   endpoint answers HTTP 409 (sandbox is `STARTING`, so it is not ready yet).
 3. A transient HTTP status (429/5xx) is retried once, respecting `Retry-After`.
+4. HTTP 404/410 means the conversation is **gone** — archived or deleted, as in
+   `{"detail": "Conversation is archived. The sandbox no longer exists."}`. No
+   nudge can ever succeed, and retrying the runtime endpoint is pointless, so
+   this is reported as `not-found`: a recovery outcome that replaces the
+   conversation instead of leaving the repository dead. The status was
+   observed in production: a conversation kept reporting `sandbox=ERROR` while
+   `send-message` answered `410` on every run.
 
 ## Scheduling and reliability
 

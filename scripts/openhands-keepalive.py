@@ -61,6 +61,10 @@ AT_RISK_OUTCOMES = {
     "idle-unknown",
 }
 TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
+# 404/410 send-messagesta tarkoittaa ett\u00e4 conversation on arkistoitu tai
+# poistettu. Sandboxia ei ole en\u00e4\u00e4 olemassa, joten nudge ei voi koskaan menn\u00e4
+# l\u00e4pi: conversation pit\u00e4\u00e4 korvata uudella.
+GONE_STATUSES = (404, 410)
 
 # --- Julkisen repon suojaus -------------------------------------------------
 # Actions-logit ja step summaryt ovat julkisessa repossa julkisia, joten
@@ -135,19 +139,24 @@ def _clean_title_text(title: str, repository: str) -> str:
 def desired_conversation_title(title: str, repository: str):
     """Uusi otsikko, joka alkaa repositorion nimell\u00e4; None jos jo kunnossa.
 
+    Omistaja j\u00e4tet\u00e4\u00e4n pois: "owner/repo" -> "repo", koska se on UI:ssa
+    pelkk\u00e4\u00e4 kohinaa. Vanha "owner/repo: ..." -otsikko migroituu t\u00e4ll\u00e4
+    kertaalleen muotoon "repo: ...".
+
     None tarkoittaa ett\u00e4 API-kutsua ei tarvita, joten jokainen ajo ei
     kirjoita conversationin otsikkoa uudelleen.
     """
     repository = (repository or "").strip()
     if not repository:
         return None
+    prefix = repository_short_name(repository)
     current = (title or "").strip()
-    if current.startswith(repository + TITLE_SEPARATOR):
+    if current.startswith(prefix + TITLE_SEPARATOR):
         return None
     rest = _clean_title_text(current, repository)
     if not rest:
         rest = DEFAULT_TITLE_SUFFIX
-    return f"{repository}{TITLE_SEPARATOR}{rest}"
+    return f"{prefix}{TITLE_SEPARATOR}{rest}"
 
 
 def sync_conversation_title(
@@ -719,6 +728,7 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
         "run": True,
         "content": [{"type": "text", "text": text}],
     }
+    last_status = None
     for attempt in (1, 2):
         try:
             r = requests.post(
@@ -731,6 +741,7 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
                 print(f"  send-message OK: {r.text[:200]}")
                 return True
             print(f"  send-message -> {r.status_code}: {r.text[:200]}")
+            last_status = r.status_code
             if attempt == 1 and r.status_code in TRANSIENT_STATUSES:
                 delay = parse_retry_after(getattr(r, "headers", None))
                 if delay <= min(30.0, budget_remaining()):
@@ -744,7 +755,13 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
             print(f"  send-message virhe: {exc}")
         break
 
-    # 409/410 tarkoittaa ett\u00e4 sandbox ei ole valmis vastaanottamaan viesti\u00e4:
+    # Arkistoitu tai poistettu conversation: sandboxia ei ole en\u00e4\u00e4 olemassa,
+    # joten nudge ei voi koskaan menn\u00e4 l\u00e4pi. T\u00e4m\u00e4 ei ole tilap\u00e4inen virhe
+    # vaan menetetty conversation -> kutsuja hoitaa korvauksen.
+    if last_status in GONE_STATUSES:
+        raise ConversationNotFound(conversation_id)
+
+    # 409 tarkoittaa ett\u00e4 sandbox ei ole valmis vastaanottamaan viesti\u00e4:
     # kokeillaan viel\u00e4 runtime-fallbackia ennen kuin todetaan ett\u00e4 nudge
     # ei mennyt l\u00e4pi.
     conv = conversation or {}
@@ -796,7 +813,9 @@ def start_conversation(base_url, headers, repository, text, dry_run, poll_attemp
 
     # Myös uusi conversation nimetään repositorion nimellä, jotta otsikosta
     # näkee heti mikä repo on työstössä.
-    title = desired_conversation_title("", repository) or repository
+    title = desired_conversation_title("", repository) or repository_short_name(
+        repository
+    )
     payload = {
         "initial_message": {"content": [{"type": "text", "text": text}]},
         "selected_repository": repository,

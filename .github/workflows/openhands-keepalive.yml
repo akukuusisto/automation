@@ -112,8 +112,8 @@ jobs:
           # Aseta "true", jos haluat että ajo epäonnistuu kun jokin conversation
           # tarvitsee ihmisen (waiting_for_confirmation).
           OPENHANDS_FAIL_ON_ATTENTION: "false"
-          # Pidä conversation-otsikot muodossa "owner/repo: ...", jotta UI:sta
-          # näkee yhdellä silmäyksellä mikä repo on työstössä.
+          # Pidä conversation-otsikot muodossa "repo: ..." (ilman omistajaa),
+          # jotta UI:sta näkee yhdellä silmäyksellä mikä repo on työstössä.
           OPENHANDS_TITLE_SYNC: "true"
           # Resume on asynkroninen: odota enintaan 30 s (3 s välein) että sandbox
           # ehtii RUNNING-tilaan ennen kuin conversationia käytetään uudelleen.
