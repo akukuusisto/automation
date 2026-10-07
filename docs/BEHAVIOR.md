@@ -26,7 +26,7 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 |---------|-----------|--------|
 | `RUNNING` | `running` | Leave alone |
 | `RUNNING` / `ERROR` | `finished` / `idle` / `stuck` / `error` / unknown | Nudge once idle passes the threshold |
-| `PAUSED` | any | Resume (cooldown). Never nudge in the same pass as a resume; nudge on a later pass if still idle |
+| `PAUSED` | any | Resume (cooldown), wait for `RUNNING`, never nudge in the same pass |
 | `MISSING` | any | Loss recovery (older conversation, or a new one) |
 | any | agent stopped in `task` mode with exactly `DONE` | Stop managing that conversation |
 
@@ -165,6 +165,8 @@ script redacts repository names (`repo#1`, `repo#2`, ...), conversation titles
 | `OPENHANDS_MIN_NUDGE_INTERVAL` | `1800` | minimum seconds between nudges of the same conversation |
 | `OPENHANDS_MAX_STALLED_NUDGES` | `4` | unanswered nudges before a conversation is treated as stalled |
 | `OPENHANDS_RESUME_COOLDOWN` | `900` | how often a `PAUSED` resume may be retried |
+| `OPENHANDS_RESUME_WAIT_SECONDS` | `90` | how long to wait for a resumed sandbox to reach `RUNNING` |
+| `OPENHANDS_RESUME_POLL_INTERVAL` | `5` | poll interval while waiting for `RUNNING` |
 | `OPENHANDS_RUN_BUDGET_SECONDS` | `420` | wall-clock budget for one `--once` run (`0` disables) |
 | `OPENHANDS_FAIL_ON_ATTENTION` | `false` | fail the run when a conversation needs a human |
 | `OPENHANDS_TITLE_SYNC` | `true` | keep conversation titles starting with the repository name |
@@ -172,3 +174,21 @@ script redacts repository names (`repo#1`, `repo#2`, ...), conversation titles
 | `OPENHANDS_AUTO_DISCOVER` | `false` | discover conversations instead of using seeds |
 
 Secrets are configured in repository settings, never in this file.
+
+## Incident log
+
+### 2026-10-04 — transient sandbox loss during keepalive
+
+- Keepalive saw a canonical conversation as `sandbox=MISSING`.
+- Recovery selected an older same-repository conversation whose sandbox was `PAUSED`.
+- `POST .../resume` returned HTTP 200, but the sandbox was still starting.
+- The immediate `send-message` then failed with HTTP 409 (`Sandbox is STARTING`).
+- The conversation recovered on its own; the next keepalive run reported every
+  managed repository as `RUNNING` again.
+
+Conclusion: `MISSING` / `PAUSED -> STARTING` can be a transient recovery state. A
+resume that has not become ready yet must not be treated as permanent sandbox
+loss, and a nudge must never be sent in the same pass as a resume.
+
+Repository names and conversation identifiers are intentionally not recorded here:
+this repository is public.

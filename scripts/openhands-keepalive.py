@@ -268,13 +268,13 @@ def parse_args():
         "--min-nudge-interval",
         type=int,
         default=int(os.getenv("OPENHANDS_MIN_NUDGE_INTERVAL", "1800")),
-        help="Nudgea ei l\u00e4hetet\u00e4 samalle conversationille t\u00e4t\u00e4 tihe\u00e4mmin (s)",
+        help="Nudgea ei lähetetä samalle conversationille tätä tiheämmin (s)",
     )
     parser.add_argument(
         "--max-stalled-nudges",
         type=int,
         default=int(os.getenv("OPENHANDS_MAX_STALLED_NUDGES", "4")),
-        help="Kuinka monen vastaamattoman nuden j\u00e4lkeen conversation korvataan",
+        help="Kuinka monen vastaamattoman nuden jälkeen conversation korvataan",
     )
     parser.add_argument(
         "--run-budget",
@@ -282,6 +282,8 @@ def parse_args():
         default=int(os.getenv("OPENHANDS_RUN_BUDGET_SECONDS", "420")),
         help="--once-ajon aikabudjetti sekunteina (0 = ei rajaa)",
     )
+    parser.add_argument("--resume-wait-seconds", type=int, default=int(os.getenv("OPENHANDS_RESUME_WAIT_SECONDS", "90")))
+    parser.add_argument("--resume-poll-interval", type=int, default=int(os.getenv("OPENHANDS_RESUME_POLL_INTERVAL", "5")))
     parser.add_argument(
         "--fail-on-attention",
         action="store_true",
@@ -292,13 +294,13 @@ def parse_args():
         "--title-sync",
         action=argparse.BooleanOptionalAction,
         default=_env_bool("OPENHANDS_TITLE_SYNC", True),
-        help="Pid\u00e4 conversation-otsikot repositorion nimell\u00e4 alkavina",
+        help="Pidä conversation-otsikot repositorion nimellä alkavina",
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
         default=_env_bool("OPENHANDS_VERBOSE"),
-        help="N\u00e4yt\u00e4 repositoriot, titlet ja t\u00e4ydet ID:t (vain paikalliseen ajoon)",
+        help="Näytä repositoriot, titlet ja täydet ID:t (vain paikalliseen ajoon)",
     )
     parser.add_argument("--dry-run", action="store_true", default=_env_bool("OPENHANDS_DRY_RUN"))
     parser.add_argument("--once", action="store_true")
@@ -658,7 +660,13 @@ def try_resume(base_url, headers, sandbox_id, dry_run):
 
 
 def wait_for_resumed_sandbox(base_url, headers, conversation_id, sandbox_id, timeout=90, interval=5):
-    """Wait for a resumed sandbox to become RUNNING before using the conversation."""
+    """Wait for a resumed sandbox to become RUNNING before using the conversation.
+
+    Resuming is asynchronous: the sandbox reports STARTING first and OpenHands
+    rejects send-message with HTTP 409 until it is RUNNING.
+    """
+    timeout = max(0, int(timeout))
+    interval = max(1, int(interval))
     deadline = time.time() + timeout
     attempt = 0
     while True:
@@ -668,17 +676,20 @@ def wait_for_resumed_sandbox(base_url, headers, conversation_id, sandbox_id, tim
         except ConversationNotFound:
             print(f"  resume wait: conversation {conversation_id[:8]} disappeared")
             return False
+        except requests.RequestException as exc:
+            print(f"  resume wait -haku ep\u00e4onnistui: {exc}")
+            return False
 
         sandbox_status = conversation.get("sandbox_status")
         print(f"  resume poll {attempt}: sandbox={sandbox_status}")
         if sandbox_status == "RUNNING":
             return True
-        if sandbox_status == "MISSING":
+        if sandbox_status in ("MISSING", "ERROR"):
             return False
         if time.time() >= deadline:
             print(f"  resume wait timeout after {timeout}s (sandbox={sandbox_status})")
             return False
-        time.sleep(interval)
+        time.sleep(min(interval, max(1, deadline - time.time())))
 
 
 def parse_retry_after(headers, default=2.0, cap=30.0) -> float:
@@ -984,24 +995,38 @@ def check_conversation(base_url, headers, conv_id, args, state):
             last_resume = state["last_resume"].get(conv_id, 0.0)
             if now - last_resume >= args.resume_cooldown:
                 print("  Sandbox PAUSED -> resume...")
-                resumed_now = try_resume(
-                    base_url, headers, sandbox_id, dry_run
-                ) and not dry_run
+                resumed = try_resume(base_url, headers, sandbox_id, dry_run)
                 state["last_resume"][conv_id] = now
-                if resumed_now:
-                    # Resume on asynkroninen: sandbox ei ole viel\u00e4 RUNNING,
-                    # joten nudge samalla kierroksella p\u00e4\u00e4ttyisi HTTP 409\n                    # -vastauskoodiin.
-                    # Seuraava kierros arvioi tuoreen tilan.
+                if not resumed:
                     print(
-                        "  Resume l\u00e4hetetty -> nudgea ei l\u00e4hetet\u00e4 samalla "
-                        "kierroksella."
+                        "  Resume ei onnistunut -> "
+                        "odotetaan seuraavaa keepalive-kierrosta"
                     )
                     return "paused"
+                if dry_run:
+                    print("  DRY-RUN: sandboxin palautumista ei odotettu")
+                elif not wait_for_resumed_sandbox(
+                    base_url,
+                    headers,
+                    conv_id,
+                    sandbox_id,
+                    timeout=args.resume_wait_seconds,
+                    interval=args.resume_poll_interval,
+                ):
+                    print(
+                        "  Sandbox ei ehtinyt RUNNING-tilaan -> "
+                        "odotetaan seuraavaa keepalive-kierrosta"
+                    )
+                    return "resuming"
+                # Resume on asynkroninen. Nudgea ei lähetetä samalla
+                # kierroksella vanhan PAUSED-tilan perusteella: seuraava
+                # keepalive-kierros arvioi tuoreen execution-tilan.
+                return "resumed"
 
             if idle_for is None:
                 print(
                     "  Idle-aikaa ei voitu mitata (PAUSED) -> "
-                    "k\u00e4sitell\u00e4\u00e4n idle-timeoutina"
+                    "käsitellään idle-timeoutina"
                 )
                 idle_for = nudge_after
 
@@ -1102,7 +1127,12 @@ def recover_repository_after_loss(
             if not try_resume(base_url, headers, sandbox_id, args.dry_run):
                 continue
             if not args.dry_run and not wait_for_resumed_sandbox(
-                base_url, headers, cid, sandbox_id
+                base_url,
+                headers,
+                cid,
+                sandbox_id,
+                timeout=args.resume_wait_seconds,
+                interval=args.resume_poll_interval,
             ):
                 continue
 

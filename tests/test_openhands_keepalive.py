@@ -127,6 +127,8 @@ class NudgeRecoveryTests(unittest.TestCase):
             nudge_mode="loop",
             no_done_check=True,
             resume_cooldown=900,
+            resume_wait_seconds=90,
+            resume_poll_interval=5,
             idle_timeout=900,
             min_nudge_interval=1800,
             max_stalled_nudges=4,
@@ -279,11 +281,19 @@ class NudgeRecoveryTests(unittest.TestCase):
         try:
             calls = []
             MODULE.try_resume = lambda *args: calls.append("resume") or True
-            MODULE.wait_for_resumed_sandbox = lambda *args: calls.append("wait") or True
+            MODULE.wait_for_resumed_sandbox = (
+                lambda *args, **kwargs: calls.append("wait") or True
+            )
             MODULE.check_conversation = lambda *args: calls.append("check") or "nudged"
 
             from types import SimpleNamespace
-            args = SimpleNamespace(dry_run=False, discover_limit=50, nudge="continue")
+            args = SimpleNamespace(
+                dry_run=False,
+                discover_limit=50,
+                nudge="continue",
+                resume_wait_seconds=90,
+                resume_poll_interval=5,
+            )
             state = {"nudges": {}, "last_resume": {}, "new_conversations": set()}
             candidates = [
                 {"id": "canonical", "sandbox_status": "MISSING"},
@@ -311,6 +321,8 @@ def keepalive_args(**overrides):
         nudge_mode="loop",
         no_done_check=False,
         resume_cooldown=900,
+        resume_wait_seconds=90,
+        resume_poll_interval=5,
         idle_timeout=900,
         min_nudge_interval=1800,
         max_stalled_nudges=4,
@@ -426,13 +438,20 @@ class NudgeHygieneTests(unittest.TestCase):
     """Nudgeja ei laheteta liian tiheaan eika jumiutuneelle conversationille."""
 
     def _run(
-        self, conversation, args=None, events=None, resume=False, activity_offset=3600
+        self,
+        conversation,
+        args=None,
+        events=None,
+        resume=False,
+        activity_offset=3600,
+        last_resume_offset=None,
     ):
         original_get = MODULE.get_conversation
         original_activity = MODULE.latest_activity_ts
         original_nudge = MODULE.send_nudge
         original_events = MODULE.fetch_recent_events
         original_resume = MODULE.try_resume
+        original_wait = MODULE.wait_for_resumed_sandbox
         try:
             MODULE.get_conversation = lambda *a: conversation
             if activity_offset is None:
@@ -446,12 +465,21 @@ class NudgeHygieneTests(unittest.TestCase):
             MODULE.send_nudge = lambda *a: calls.append(a) or True
             MODULE.fetch_recent_events = lambda *a, **k: events
             MODULE.try_resume = lambda *a: resume
+            # Oikea odotus kest\u00e4\u00e4 resume_wait_seconds; sen semantiikka on
+            # katettu ResumeRecoveryTests-luokassa. T\u00e4ss\u00e4 riitt\u00e4\u00e4 ett\u00e4
+            # resume ei vaadi nudgea samalla kierroksella.
+            MODULE.wait_for_resumed_sandbox = lambda *a, **k: True
+            state = {"nudges": {}, "last_resume": {}, "new_conversations": set()}
+            if last_resume_offset is not None:
+                state["last_resume"]["conversation-1"] = (
+                    MODULE.time.time() - last_resume_offset
+                )
             outcome = MODULE.check_conversation(
                 "https://app.all-hands.dev",
                 {},
                 "conversation-1",
                 args or keepalive_args(),
-                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+                state,
             )
             return outcome, calls
         finally:
@@ -460,6 +488,7 @@ class NudgeHygieneTests(unittest.TestCase):
             MODULE.send_nudge = original_nudge
             MODULE.fetch_recent_events = original_events
             MODULE.try_resume = original_resume
+            MODULE.wait_for_resumed_sandbox = original_wait
 
     def _conversation(self, **overrides):
         values = {
@@ -506,15 +535,28 @@ class NudgeHygieneTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_paused_resume_is_not_followed_by_a_nudge_in_the_same_pass(self):
+        # Resume onnistuu -> "resumed". Vanhan PAUSED-tilan perusteella ei
+        # laheteta nudgea: seuraava kierros arvioi tuoreen execution-tilan.
         outcome, calls = self._run(
             self._conversation(sandbox_status="PAUSED", execution_status=None),
             events=[agent_event()],
             resume=True,
         )
+        self.assertEqual(outcome, "resumed")
+        self.assertEqual(calls, [])
+
+    def test_paused_resume_failure_stays_paused_without_nudging(self):
+        outcome, calls = self._run(
+            self._conversation(sandbox_status="PAUSED", execution_status=None),
+            events=[agent_event()],
+            resume=False,
+        )
         self.assertEqual(outcome, "paused")
         self.assertEqual(calls, [])
 
     def test_paused_with_unmeasurable_idle_is_still_nudged(self):
+        # Resume on juuri tehty (cooldown voimassa), joten PAUSED-tilaa ei
+        # yriteta resumeta uudelleen vaan se kasitellaan idle-timeoutina.
         outcome, calls = self._run(
             self._conversation(
                 sandbox_status="PAUSED",
@@ -524,16 +566,19 @@ class NudgeHygieneTests(unittest.TestCase):
             events=[agent_event()],
             resume=False,
             activity_offset=None,
+            last_resume_offset=0,
         )
         self.assertEqual(outcome, "nudged")
         self.assertEqual(len(calls), 1)
 
     def test_paused_dry_run_still_reports_what_would_happen(self):
+        # Resume-cooldown voimassa -> dry-run nayttaa minka nudgen lahettaisi.
         outcome, calls = self._run(
             self._conversation(sandbox_status="PAUSED", execution_status=None),
             args=keepalive_args(dry_run=True),
             events=[agent_event()],
             resume=True,
+            last_resume_offset=0,
         )
         self.assertEqual(outcome, "dry-nudge")
         self.assertEqual(len(calls), 1)
@@ -938,6 +983,125 @@ class TitleSyncTests(unittest.TestCase):
         self.assertEqual(outcome, "running")
         # repo-nimi siivotaan pois otsikon alusta, ettei se toistu
         self.assertEqual(fake.payloads, [{"title": "org/toolbox: loop"}])
+
+
+class ResumeRecoveryTests(unittest.TestCase):
+    """Resume on asynkroninen: nudgea ei laheteta ennen kuin sandbox on RUNNING."""
+
+    def _args(self, **overrides):
+        from types import SimpleNamespace
+        values = dict(
+            dry_run=False,
+            nudge="continue",
+            nudge_mode="loop",
+            no_done_check=True,
+            resume_cooldown=900,
+            resume_wait_seconds=90,
+            resume_poll_interval=1,
+            idle_timeout=900,
+            min_nudge_interval=1800,
+            max_stalled_nudges=4,
+            run_budget=420,
+            fail_on_attention=False,
+            verbose=False,
+            title_sync=True,
+        )
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def _conversation(self, status):
+        return {
+            "sandbox_status": status,
+            "execution_status": None,
+            "updated_at": "2026-10-01T10:00:00Z",
+            "title": "resumed agent",
+            "sandbox_id": "sandbox-1",
+        }
+
+    def _run(self, args, statuses, resume=True):
+        original_get = MODULE.get_conversation
+        original_activity = MODULE.latest_activity_ts
+        original_resume = MODULE.try_resume
+        original_nudge = MODULE.send_nudge
+        original_sleep = MODULE.time.sleep
+        try:
+            statuses_iter = iter(statuses)
+            MODULE.get_conversation = lambda *a, **k: self._conversation(
+                next(statuses_iter)
+            )
+            # raskas idle, jotta testi todistaa ettei nudgea laheteta
+            MODULE.latest_activity_ts = lambda *a: MODULE.time.time() - 3600
+            MODULE.try_resume = lambda *a: resume
+            calls = []
+            MODULE.send_nudge = lambda *a: calls.append(a) or True
+            MODULE.time.sleep = lambda *a: None
+            outcome = MODULE.check_conversation(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                args,
+                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+            )
+            return outcome, calls
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.latest_activity_ts = original_activity
+            MODULE.try_resume = original_resume
+            MODULE.send_nudge = original_nudge
+            MODULE.time.sleep = original_sleep
+
+    def test_paused_sandbox_waits_until_running_before_nudging(self):
+        outcome, calls = self._run(
+            self._args(), ["PAUSED", "STARTING", "RUNNING"]
+        )
+        self.assertEqual(outcome, "resumed")
+        self.assertEqual(calls, [])
+
+    def test_paused_sandbox_that_never_becomes_ready_reports_resuming(self):
+        outcome, calls = self._run(
+            self._args(resume_wait_seconds=0), ["PAUSED", "STARTING"]
+        )
+        self.assertEqual(outcome, "resuming")
+        self.assertEqual(calls, [])
+
+    def test_failed_resume_stays_paused_without_nudging(self):
+        outcome, calls = self._run(self._args(), ["PAUSED"], resume=False)
+        self.assertEqual(outcome, "paused")
+        self.assertEqual(calls, [])
+
+    def test_dry_run_resume_is_not_waited_on(self):
+        outcome, calls = self._run(self._args(dry_run=True), ["PAUSED"])
+        self.assertEqual(outcome, "resumed")
+        self.assertEqual(calls, [])
+
+    def test_wait_returns_false_when_the_sandbox_errors(self):
+        original_get = MODULE.get_conversation
+        original_sleep = MODULE.time.sleep
+        try:
+            MODULE.get_conversation = lambda *a, **k: self._conversation("ERROR")
+            MODULE.time.sleep = lambda *a: None
+            ready = MODULE.wait_for_resumed_sandbox(
+                "https://app.all-hands.dev", {}, "conversation-1", "sandbox-1"
+            )
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.time.sleep = original_sleep
+        self.assertFalse(ready)
+
+    def test_wait_returns_true_once_running(self):
+        original_get = MODULE.get_conversation
+        original_sleep = MODULE.time.sleep
+        statuses = iter(["STARTING", "RUNNING"])
+        try:
+            MODULE.get_conversation = lambda *a, **k: self._conversation(next(statuses))
+            MODULE.time.sleep = lambda *a: None
+            ready = MODULE.wait_for_resumed_sandbox(
+                "https://app.all-hands.dev", {}, "conversation-1", "sandbox-1"
+            )
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.time.sleep = original_sleep
+        self.assertTrue(ready)
 
 
 if __name__ == "__main__":

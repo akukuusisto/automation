@@ -115,6 +115,10 @@ jobs:
           # Pidä conversation-otsikot muodossa "owner/repo: ...", jotta UI:sta
           # näkee yhdellä silmäyksellä mikä repo on työstössä.
           OPENHANDS_TITLE_SYNC: "true"
+          # Resume on asynkroninen: odota enintaan 30 s (3 s välein) että sandbox
+          # ehtii RUNNING-tilaan ennen kuin conversationia käytetään uudelleen.
+          OPENHANDS_RESUME_WAIT_SECONDS: "30"
+          OPENHANDS_RESUME_POLL_INTERVAL: "3"
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
           # schedule -> always discover; workflow_dispatch respects the discover input
           OPENHANDS_AUTO_DISCOVER: ${{ github.event_name == 'schedule' || inputs.discover }}
