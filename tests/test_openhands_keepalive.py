@@ -535,15 +535,38 @@ class NudgeHygieneTests(unittest.TestCase):
         self.assertEqual(outcome, "nudged")
         self.assertEqual(len(calls), 1)
 
-    def test_paused_resume_is_not_followed_by_a_nudge_in_the_same_pass(self):
-        # Resume onnistuu -> "resumed". Vanhan PAUSED-tilan perusteella ei
-        # laheteta nudgea: seuraava kierros arvioi tuoreen execution-tilan.
+    def test_paused_resume_nudges_right_away_when_already_past_the_threshold(self):
+        # Resume nollaa activity-aikaleiman, mutta conversation oli jo yli
+        # idle-rajan: nudge lähtee samalla kierroksella.
         outcome, calls = self._run(
             self._conversation(sandbox_status="PAUSED", execution_status=None),
             events=[agent_event()],
             resume=True,
         )
+        self.assertEqual(outcome, "resumed->nudged")
+        self.assertEqual(len(calls), 1)
+
+    def test_paused_resume_below_the_threshold_waits_for_the_next_pass(self):
+        outcome, calls = self._run(
+            self._conversation(sandbox_status="PAUSED", execution_status=None),
+            events=[agent_event()],
+            resume=True,
+            activity_offset=100,
+        )
         self.assertEqual(outcome, "resumed")
+        self.assertEqual(calls, [])
+
+    def test_paused_resume_that_never_answers_is_still_replaced(self):
+        events = [
+            user_event(timestamp=f"2026-10-07T10:0{minute}:00Z")
+            for minute in (1, 2, 3, 4)
+        ]
+        outcome, calls = self._run(
+            self._conversation(sandbox_status="PAUSED", execution_status=None),
+            events=events,
+            resume=True,
+        )
+        self.assertEqual(outcome, "resumed->stalled")
         self.assertEqual(calls, [])
 
     def test_paused_resume_failure_stays_paused_without_nudging(self):
@@ -1172,8 +1195,45 @@ class ResumeRecoveryTests(unittest.TestCase):
         outcome, calls = self._run(
             self._args(), ["PAUSED", "STARTING", "RUNNING"]
         )
-        self.assertEqual(outcome, "resumed")
-        self.assertEqual(calls, [])
+        self.assertEqual(outcome, "resumed->nudged")
+        self.assertEqual(len(calls), 1)
+
+    def test_nudge_is_sent_only_after_the_sandbox_is_running(self):
+        original_get = MODULE.get_conversation
+        original_activity = MODULE.latest_activity_ts
+        original_resume = MODULE.try_resume
+        original_nudge = MODULE.send_nudge
+        original_sleep = MODULE.time.sleep
+        try:
+            seen = []
+            statuses = iter(["PAUSED", "STARTING", "RUNNING"])
+
+            def fake_get(*a, **k):
+                seen.append(next(statuses))
+                return self._conversation(seen[-1])
+
+            MODULE.get_conversation = fake_get
+            MODULE.latest_activity_ts = lambda *a: MODULE.time.time() - 3600
+            MODULE.try_resume = lambda *a: True
+            nudged_when = []
+            MODULE.send_nudge = lambda *a: nudged_when.append(list(seen)) or True
+            MODULE.time.sleep = lambda *a: None
+            outcome = MODULE.check_conversation(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-1",
+                self._args(),
+                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+            )
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.latest_activity_ts = original_activity
+            MODULE.try_resume = original_resume
+            MODULE.send_nudge = original_nudge
+            MODULE.time.sleep = original_sleep
+        self.assertEqual(outcome, "resumed->nudged")
+        # Nudge lähti vasta kun sandbox oli RUNNING, ei vielä STARTING-tilassa.
+        self.assertEqual(nudged_when, [["PAUSED", "STARTING", "RUNNING"]])
 
     def test_paused_sandbox_that_never_becomes_ready_reports_resuming(self):
         outcome, calls = self._run(

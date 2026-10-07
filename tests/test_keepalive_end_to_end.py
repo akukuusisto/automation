@@ -49,6 +49,7 @@ ALPHA_ALIVE = "alive001-1111-2222-3333-444444444444"
 BETA_STALLED = "busy0001-1111-2222-3333-444444444444"
 GAMMA_FRESH = "gamma001-1111-2222-3333-444444444444"
 DELTA_HUMAN = "delta001-1111-2222-3333-444444444444"
+PAUSED_SLEEPY = "sleepy01-1111-2222-3333-444444444444"
 
 CONVERSATIONS = {
     # newest conversation lost its sandbox -> an older live one must be canonical
@@ -108,6 +109,13 @@ class _FakeOpenHands(BaseHTTPRequestHandler):
 
     def do_POST(self):
         _posted_paths.append(self.path)
+        # Resume on asynkroninen: sandbox siirtyy RUNNING-tilaan vasta kun
+        # resume on vastaanotettu, joten pollaus näkee STARTING -> RUNNING.
+        if self.path.endswith("/resume"):
+            sandbox_id = self.path.split("/api/v1/sandboxes/")[1].split("/")[0]
+            for item in CONVERSATIONS.values():
+                if item.get("sandbox_id") == sandbox_id:
+                    item["sandbox_status"] = "RUNNING"
         self._send({"ok": True})
 
 
@@ -125,14 +133,14 @@ class KeepaliveEndToEndTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
 
-    def _run_once(self, tmp_dir):
+    def _run_once(self, tmp_dir, dry_run=True, extra_env=None):
         summary = str(pathlib.Path(tmp_dir) / "summary.md")
         env = dict(os.environ)
         env.update({
             "OPENHANDS_API_KEY": "test-key",
             "OPENHANDS_BASE_URL": "http://127.0.0.1:%d" % self.port,
             "OPENHANDS_AUTO_DISCOVER": "1",
-            "OPENHANDS_DRY_RUN": "1",
+            "OPENHANDS_DRY_RUN": "1" if dry_run else "",
             "OPENHANDS_NUDGE_MODE": "loop",
             "OPENHANDS_IDLE_TIMEOUT": "900",
             "OPENHANDS_MIN_NUDGE_INTERVAL": "1800",
@@ -143,10 +151,12 @@ class KeepaliveEndToEndTests(unittest.TestCase):
         for name in ("OPENHANDS_VERBOSE", "OPENHANDS_CONVERSATION_IDS",
                      "OPENHANDS_FAIL_ON_ATTENTION", "OPENHANDS_NO_DONE_CHECK"):
             env.pop(name, None)
+        env.update(extra_env or {})
         # a freshness relative to the real clock keeps the idle assertion stable
-        CONVERSATIONS[GAMMA_FRESH] = conversation(
-            GAMMA_FRESH, "org/gamma", "2026-10-02T11:00:00Z", "RUNNING", "finished", iso_now()
-        )
+        if GAMMA_FRESH in CONVERSATIONS:
+            CONVERSATIONS[GAMMA_FRESH] = conversation(
+                GAMMA_FRESH, "org/gamma", "2026-10-02T11:00:00Z", "RUNNING", "finished", iso_now()
+            )
 
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--once"],
@@ -200,6 +210,69 @@ class KeepaliveEndToEndTests(unittest.TestCase):
             self.fail(
                 "failed checks: %s\n--- stdout ---\n%s\n--- summary ---\n%s"
                 % (", ".join(failures), out, summary)
+            )
+
+
+    def test_a_woken_conversation_is_nudged_in_the_same_pass(self):
+        """PAUSED -> resume -> odota RUNNING -> nudge, samalla kierroksella.
+
+        Resume nollaa activity-aikaleiman, joten ilman saman kierroksen nudgea
+        her\u00e4tetty conversation n\u00e4ytt\u00e4isi "juuri aktiiviselta" ja odottaisi
+        koko nudge-rajan (30 min) ennen kuin sit\u00e4 pyydett\u00e4isiin t\u00f6ihin.
+        """
+        import tempfile
+
+        saved = dict(CONVERSATIONS)
+        try:
+            CONVERSATIONS.clear()
+            CONVERSATIONS[PAUSED_SLEEPY] = conversation(
+                PAUSED_SLEEPY,
+                "org/sleepy",
+                "2026-10-02T10:00:00Z",
+                "PAUSED",
+                None,
+                OLD,
+            )
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                proc, summary = self._run_once(
+                    tmp_dir,
+                    dry_run=False,
+                    extra_env={
+                        "OPENHANDS_RESUME_WAIT_SECONDS": "10",
+                        "OPENHANDS_RESUME_POLL_INTERVAL": "1",
+                    },
+                )
+        finally:
+            CONVERSATIONS.clear()
+            CONVERSATIONS.update(saved)
+
+        posts = list(_posted_paths)
+        resume_at = next(
+            (i for i, path in enumerate(posts) if path.endswith("/resume")), None
+        )
+        nudge_at = next(
+            (i for i, path in enumerate(posts) if path.endswith("/send-message")),
+            None,
+        )
+
+        failures = []
+        for name, ok in (
+            ("exit code 0", proc.returncode == 0),
+            ("the sandbox was resumed", resume_at is not None),
+            ("the conversation was nudged", nudge_at is not None),
+            ("the nudge came only after the resume",
+             resume_at is not None and nudge_at is not None and resume_at < nudge_at),
+            ("the sandbox was waited for", "resume poll" in proc.stdout),
+            ("the outcome is visible", "resumed->nudged" in proc.stdout),
+            ("the repository name stays redacted", "org/sleepy" not in proc.stdout),
+        ):
+            if not ok:
+                failures.append(name)
+
+        if failures:
+            self.fail(
+                "failed checks: %s\nposted: %s\n--- stdout ---\n%s\n--- summary ---\n%s"
+                % (", ".join(failures), posts, proc.stdout, summary)
             )
 
 
