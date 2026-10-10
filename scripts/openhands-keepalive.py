@@ -374,6 +374,20 @@ def resolve_skip_ids():
     return {p.strip() for p in os.getenv("OPENHANDS_SKIP_IDS", "").split(",") if p.strip()}
 
 
+def normalize_repository_name(repository: str) -> str:
+    """Normalize owner/repo names for case-insensitive skip-list matching."""
+    return repository.strip().rstrip("/").casefold() if isinstance(repository, str) else ""
+
+
+def resolve_skip_repositories():
+    """Read the optional comma-separated repository denylist from the environment."""
+    return {
+        normalized
+        for raw in os.getenv("OPENHANDS_SKIP_REPOSITORIES", "").split(",")
+        if (normalized := normalize_repository_name(raw))
+    }
+
+
 def parse_updated_at(value: str) -> float:
     if not value:
         return 0.0
@@ -471,15 +485,25 @@ def _repository_from_conversation(conversation):
     return repository.strip() if isinstance(repository, str) else ""
 
 
-def group_conversations_by_repository(items, skip_ids=None):
+def group_conversations_by_repository(items, skip_ids=None, skip_repositories=None):
     groups = {}
     skip_ids = skip_ids or set()
+    skip_repositories = {
+        normalized
+        for repository in (skip_repositories or set())
+        if (normalized := normalize_repository_name(repository))
+    }
     for item in items:
         if not isinstance(item, dict):
             continue
         cid = (item.get("id") or "").strip()
         repository = _repository_from_conversation(item)
-        if not cid or not repository or cid in skip_ids:
+        if (
+            not cid
+            or not repository
+            or cid in skip_ids
+            or normalize_repository_name(repository) in skip_repositories
+        ):
             continue
         groups.setdefault(repository, []).append(item)
 
@@ -1232,7 +1256,9 @@ def recover_repository_after_loss(
     return replacement or "", "sandbox-replaced" if replacement else "replacement-failed"
 
 
-def collect_conversation_groups(base_url, headers, args, seed_ids, skip_ids):
+def collect_conversation_groups(
+    base_url, headers, args, seed_ids, skip_ids, skip_repositories=None
+):
     items = (
         discover_conversations(
             base_url,
@@ -1268,7 +1294,9 @@ def collect_conversation_groups(base_url, headers, args, seed_ids, skip_ids):
                 f"{label_conversation(cid)}: {safe_error_label(exc)}"
             )
 
-    return group_conversations_by_repository(items, skip_ids=skip_ids)
+    return group_conversations_by_repository(
+        items, skip_ids=skip_ids, skip_repositories=skip_repositories
+    )
 
 
 def write_step_summary(results):
@@ -1362,6 +1390,7 @@ def main():
     state = {"nudges": {}, "last_resume": {}, "new_conversations": set()}
     seed_ids = resolve_conversation_ids(args)
     skip_ids = resolve_skip_ids()
+    skip_repositories = resolve_skip_repositories()
 
     # Aikabudjetti vain --once-ajoon: pit\u00e4\u00e4 huolen ett\u00e4 yhteenveto ehtii
     # synty\u00e4 ennen jobin timeoutia.
@@ -1369,7 +1398,12 @@ def main():
         set_budget_deadline(time.monotonic() + args.run_budget)
 
     groups = collect_conversation_groups(
-        base_url, headers, args, seed_ids=seed_ids, skip_ids=skip_ids
+        base_url,
+        headers,
+        args,
+        seed_ids=seed_ids,
+        skip_ids=skip_ids,
+        skip_repositories=skip_repositories,
     )
     latest = select_latest_per_repository(groups)
 
