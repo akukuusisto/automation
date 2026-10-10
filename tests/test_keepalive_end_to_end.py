@@ -149,7 +149,8 @@ class KeepaliveEndToEndTests(unittest.TestCase):
             "GITHUB_STEP_SUMMARY": summary,
         })
         for name in ("OPENHANDS_VERBOSE", "OPENHANDS_CONVERSATION_IDS",
-                     "OPENHANDS_FAIL_ON_ATTENTION", "OPENHANDS_NO_DONE_CHECK"):
+                     "OPENHANDS_FAIL_ON_ATTENTION", "OPENHANDS_FAIL_ON_RISK",
+                     "OPENHANDS_NO_DONE_CHECK"):
             env.pop(name, None)
         env.update(extra_env or {})
         # a freshness relative to the real clock keeps the idle assertion stable
@@ -199,8 +200,9 @@ class KeepaliveEndToEndTests(unittest.TestCase):
              "-1111-2222-3333-444444444444" not in out),
             ("summary marks needs human",
              "Needs human (1)" in summary),
-            ("summary keeps the stall visible at risk",
-             "At risk (1)" in summary and "stalled->sandbox-replaced" in summary),
+            ("summary distinguishes successful recovery from unresolved risk",
+             "Recovered (1)" in summary and "stalled->sandbox-replaced" in summary
+             and "At risk (0)" in summary),
             ("dry run sends nothing", _posted_paths == []),
         ):
             if not ok:
