@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "openhands-keepalive.py"
@@ -80,6 +81,48 @@ class RecoveryIdempotencyTests(unittest.TestCase):
 
 
 class RepositorySelectionTests(unittest.TestCase):
+    def test_skip_repositories_resolves_optional_environment_secret(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENHANDS_SKIP_REPOSITORIES":
+                    " akukuusisto/neon-volt-fusion , ORG/example/ , , "
+            },
+        ):
+            self.assertEqual(
+                MODULE.resolve_skip_repositories(),
+                {"akukuusisto/neon-volt-fusion", "org/example"},
+            )
+
+    def test_skip_repository_excludes_all_conversations_case_insensitively(self):
+        groups = MODULE.group_conversations_by_repository(
+            [
+                {
+                    "id": "excluded-old",
+                    "selected_repository": "akukuusisto/neon-volt-fusion",
+                    "created_at": "2026-10-01T10:00:00Z",
+                    "sandbox_status": "RUNNING",
+                },
+                {
+                    "id": "excluded-new",
+                    "selected_repository": "akukuusisto/neon-volt-fusion",
+                    "created_at": "2026-10-03T10:00:00Z",
+                    "sandbox_status": "RUNNING",
+                },
+                {
+                    "id": "kept",
+                    "selected_repository": "akukuusisto/accounter",
+                    "created_at": "2026-10-02T10:00:00Z",
+                    "sandbox_status": "PAUSED",
+                },
+            ],
+            skip_repositories={" AKUKUUSISTO/NEON-VOLT-FUSION/ "},
+        )
+        self.assertNotIn("akukuusisto/neon-volt-fusion", groups)
+        self.assertEqual(
+            groups["akukuusisto/accounter"][0]["id"], "kept"
+        )
+
     def test_only_newest_conversation_is_canonical_per_repository(self):
         groups = MODULE.group_conversations_by_repository([
             {"id":"old","selected_repository":"akukuusisto/tradefoundry","created_at":"2026-10-01T10:00:00Z","sandbox_status":"RUNNING"},
