@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       max-age-minutes:
-        description: "Suurin sallittu ikä viimeisimmälle onnistuneelle keepalive-ajolle"
+        description: "Suurin sallittu ikä viimeisimmälle keepalive-dispatch-ajolle"
         required: false
         default: "45"
         type: string
