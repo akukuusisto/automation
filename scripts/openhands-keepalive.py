@@ -485,9 +485,14 @@ def _repository_from_conversation(conversation):
     return repository.strip() if isinstance(repository, str) else ""
 
 
-def group_conversations_by_repository(items, skip_ids=None, skip_repositories=None):
+def group_conversations_by_repository(
+    items, skip_ids=None, skip_repositories=None, excluded_repositories=None
+):
     groups = {}
     skip_ids = skip_ids or set()
+    excluded_repositories = (
+        excluded_repositories if excluded_repositories is not None else set()
+    )
     skip_repositories = {
         normalized
         for repository in (skip_repositories or set())
@@ -498,12 +503,11 @@ def group_conversations_by_repository(items, skip_ids=None, skip_repositories=No
             continue
         cid = (item.get("id") or "").strip()
         repository = _repository_from_conversation(item)
-        if (
-            not cid
-            or not repository
-            or cid in skip_ids
-            or normalize_repository_name(repository) in skip_repositories
-        ):
+        normalized_repository = normalize_repository_name(repository)
+        if not cid or not repository or cid in skip_ids:
+            continue
+        if normalized_repository in skip_repositories:
+            excluded_repositories.add(normalized_repository)
             continue
         groups.setdefault(repository, []).append(item)
 
@@ -1257,7 +1261,13 @@ def recover_repository_after_loss(
 
 
 def collect_conversation_groups(
-    base_url, headers, args, seed_ids, skip_ids, skip_repositories=None
+    base_url,
+    headers,
+    args,
+    seed_ids,
+    skip_ids,
+    skip_repositories=None,
+    excluded_repositories=None,
 ):
     items = (
         discover_conversations(
@@ -1295,7 +1305,10 @@ def collect_conversation_groups(
             )
 
     return group_conversations_by_repository(
-        items, skip_ids=skip_ids, skip_repositories=skip_repositories
+        items,
+        skip_ids=skip_ids,
+        skip_repositories=skip_repositories,
+        excluded_repositories=excluded_repositories,
     )
 
 
@@ -1391,6 +1404,7 @@ def main():
     seed_ids = resolve_conversation_ids(args)
     skip_ids = resolve_skip_ids()
     skip_repositories = resolve_skip_repositories()
+    excluded_repositories = set()
 
     # Aikabudjetti vain --once-ajoon: pit\u00e4\u00e4 huolen ett\u00e4 yhteenveto ehtii
     # synty\u00e4 ennen jobin timeoutia.
@@ -1404,10 +1418,19 @@ def main():
         seed_ids=seed_ids,
         skip_ids=skip_ids,
         skip_repositories=skip_repositories,
+        excluded_repositories=excluded_repositories,
     )
     latest = select_latest_per_repository(groups)
 
     if not latest:
+        if excluded_repositories:
+            print(
+                "No keepalive conversations remain after repository exclusions "
+                f"({len(excluded_repositories)} excluded repositories)."
+            )
+            if args.once:
+                write_step_summary([])
+            return
         print("Ei hallittavia conversationeita l\u00f6ydetty.", file=sys.stderr)
         sys.exit(2)
 
