@@ -9,20 +9,23 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 ## Selection rules
 
 1. Discover available conversations (or use seed IDs from secrets).
-2. Group by `selected_repository`.
-3. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
+2. Exclude every repository listed in the optional `OPENHANDS_SKIP_REPOSITORIES`
+   secret (case-insensitive, comma-separated), including all its conversations.
+   Excluded repositories are not nudged, recovered, or replaced.
+3. Group by `selected_repository`.
+4. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
    or `STARTING`).
-4. A conversation with sandbox `ERROR` is not considered usable when another
+5. A conversation with sandbox `ERROR` is not considered usable when another
    candidate has a non-error, non-missing sandbox. This keeps a broken newest
    conversation from masking an older working one.
-5. If no usable candidate exists, try the newest non-missing conversation so the
+6. If no usable candidate exists, try the newest non-missing conversation so the
    recovery path can attempt to repair it; only use a `MISSING` candidate when
    every candidate is missing.
-6. Loss recovery runs when the selected conversation is missing, not found,
+7. Loss recovery runs when the selected conversation is missing, not found,
    stalled, or unable to accept a nudge. Reuse an older conversation where possible,
    or start a replacement when no reusable conversation exists and no recent
    start-task is active.
-7. A conversation that is resumed or replaced automatically becomes canonical on
+8. A conversation that is resumed or replaced automatically becomes canonical on
    the next run when its sandbox is usable.
 
 ## Nudge rules
@@ -189,6 +192,7 @@ forcibly ignored inside GitHub Actions.
 | `OPENHANDS_API_KEY` | — | required |
 | `OPENHANDS_CONVERSATION_IDS` | — | seed IDs / bootstrap scope |
 | `OPENHANDS_SKIP_IDS` | — | conversations to ignore |
+| `OPENHANDS_SKIP_REPOSITORIES` | — | optional comma-separated `owner/repo` denylist; excluded repositories are never managed |
 | `OPENHANDS_NUDGE` | built-in | override nudge text |
 | `OPENHANDS_NUDGE_MODE` | `loop` | `loop` (never stops) or `task` (`DONE` stops) |
 | `OPENHANDS_IDLE_TIMEOUT` | `900` | idle seconds before a nudge is considered |

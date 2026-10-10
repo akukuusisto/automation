@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "openhands-keepalive.py"
@@ -80,6 +81,86 @@ class RecoveryIdempotencyTests(unittest.TestCase):
 
 
 class RepositorySelectionTests(unittest.TestCase):
+    def test_skip_repositories_resolves_optional_environment_secret(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENHANDS_SKIP_REPOSITORIES":
+                    " example-org/skip-this-repo , ORG/example/ , , "
+            },
+        ):
+            self.assertEqual(
+                MODULE.resolve_skip_repositories(),
+                {"example-org/skip-this-repo", "org/example"},
+            )
+
+    def test_skip_repository_excludes_all_conversations_case_insensitively(self):
+        excluded = set()
+        groups = MODULE.group_conversations_by_repository(
+            [
+                {
+                    "id": "excluded-old",
+                    "selected_repository": "example-org/skip-this-repo",
+                    "created_at": "2026-10-01T10:00:00Z",
+                    "sandbox_status": "RUNNING",
+                },
+                {
+                    "id": "excluded-new",
+                    "selected_repository": "example-org/skip-this-repo",
+                    "created_at": "2026-10-03T10:00:00Z",
+                    "sandbox_status": "RUNNING",
+                },
+                {
+                    "id": "kept",
+                    "selected_repository": "example-org/keep-this-repo",
+                    "created_at": "2026-10-02T10:00:00Z",
+                    "sandbox_status": "PAUSED",
+                },
+            ],
+            skip_repositories={" EXAMPLE-ORG/SKIP-THIS-REPO/ "},
+            excluded_repositories=excluded,
+        )
+        self.assertEqual(excluded, {"example-org/skip-this-repo"})
+        self.assertNotIn("example-org/skip-this-repo", groups)
+        self.assertEqual(
+            groups["example-org/keep-this-repo"][0]["id"], "kept"
+        )
+
+    def test_main_succeeds_when_all_discovered_repositories_are_excluded(self):
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(
+            once=True,
+            run_budget=0,
+            base_url="https://app.all-hands.dev",
+            idle_timeout=900,
+            min_nudge_interval=1800,
+            max_stalled_nudges=4,
+            verbose=False,
+        )
+
+        def collect_groups(*_args, excluded_repositories=None, **_kwargs):
+            excluded_repositories.add("example-org/skip-this-repo")
+            return {}
+
+        with patch.dict("os.environ", {"OPENHANDS_API_KEY": "test-key"}):
+            with patch.object(MODULE, "parse_args", return_value=args):
+                with patch.object(MODULE, "resolve_conversation_ids", return_value=[]):
+                    with patch.object(MODULE, "resolve_skip_ids", return_value=set()):
+                        with patch.object(
+                            MODULE,
+                            "resolve_skip_repositories",
+                            return_value={"example-org/skip-this-repo"},
+                        ):
+                            with patch.object(
+                                MODULE,
+                                "collect_conversation_groups",
+                                side_effect=collect_groups,
+                            ):
+                                with patch.object(MODULE, "write_step_summary") as summary:
+                                    MODULE.main()
+        summary.assert_called_once_with([])
+
     def test_only_newest_conversation_is_canonical_per_repository(self):
         groups = MODULE.group_conversations_by_repository([
             {"id":"old","selected_repository":"akukuusisto/tradefoundry","created_at":"2026-10-01T10:00:00Z","sandbox_status":"RUNNING"},
