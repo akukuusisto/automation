@@ -111,7 +111,7 @@ class RepositorySelectionTests(unittest.TestCase):
                 },
                 {
                     "id": "kept",
-                    "selected_repository": "akukuusisto/accounter",
+                    "selected_repository": "example-org/keep-this-repo",
                     "created_at": "2026-10-02T10:00:00Z",
                     "sandbox_status": "PAUSED",
                 },
@@ -120,7 +120,7 @@ class RepositorySelectionTests(unittest.TestCase):
         )
         self.assertNotIn("example-org/skip-this-repo", groups)
         self.assertEqual(
-            groups["akukuusisto/accounter"][0]["id"], "kept"
+            groups["example-org/keep-this-repo"][0]["id"], "kept"
         )
 
     def test_only_newest_conversation_is_canonical_per_repository(self):
