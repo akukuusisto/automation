@@ -86,12 +86,12 @@ class RepositorySelectionTests(unittest.TestCase):
             "os.environ",
             {
                 "OPENHANDS_SKIP_REPOSITORIES":
-                    " akukuusisto/neon-volt-fusion , ORG/example/ , , "
+                    " example-org/skip-this-repo , ORG/example/ , , "
             },
         ):
             self.assertEqual(
                 MODULE.resolve_skip_repositories(),
-                {"akukuusisto/neon-volt-fusion", "org/example"},
+                {"example-org/skip-this-repo", "org/example"},
             )
 
     def test_skip_repository_excludes_all_conversations_case_insensitively(self):
@@ -99,13 +99,13 @@ class RepositorySelectionTests(unittest.TestCase):
             [
                 {
                     "id": "excluded-old",
-                    "selected_repository": "akukuusisto/neon-volt-fusion",
+                    "selected_repository": "example-org/skip-this-repo",
                     "created_at": "2026-10-01T10:00:00Z",
                     "sandbox_status": "RUNNING",
                 },
                 {
                     "id": "excluded-new",
-                    "selected_repository": "akukuusisto/neon-volt-fusion",
+                    "selected_repository": "example-org/skip-this-repo",
                     "created_at": "2026-10-03T10:00:00Z",
                     "sandbox_status": "RUNNING",
                 },
@@ -116,9 +116,9 @@ class RepositorySelectionTests(unittest.TestCase):
                     "sandbox_status": "PAUSED",
                 },
             ],
-            skip_repositories={" AKUKUUSISTO/NEON-VOLT-FUSION/ "},
+            skip_repositories={" EXAMPLE-ORG/SKIP-THIS-REPO/ "},
         )
-        self.assertNotIn("akukuusisto/neon-volt-fusion", groups)
+        self.assertNotIn("example-org/skip-this-repo", groups)
         self.assertEqual(
             groups["akukuusisto/accounter"][0]["id"], "kept"
         )
