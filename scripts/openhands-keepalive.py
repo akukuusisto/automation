@@ -1112,9 +1112,12 @@ def check_conversation(base_url, headers, conv_id, args, state):
             return resume_prefix + "paused"
 
         if sandbox_status == "STARTING":
-            created_ts = parse_updated_at(conversation.get("created_at", ""))
+            # Conversation age is not sandbox age: an old conversation can
+            # legitimately have a newly resumed sandbox. Use updated_at as the
+            # best available proxy for a recent state transition.
+            starting_since = parse_updated_at(conversation.get("updated_at", ""))
             startup_timeout = max(600, getattr(args, "resume_wait_seconds", 90) * 2)
-            if created_ts and now - created_ts >= startup_timeout:
+            if starting_since and now - starting_since >= startup_timeout:
                 print(
                     f"  Sandbox STARTING yli {startup_timeout}s -> "
                     "recoveroidaan jumittunut käynnistys"
