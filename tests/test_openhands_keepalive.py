@@ -126,6 +126,41 @@ class RepositorySelectionTests(unittest.TestCase):
             groups["example-org/keep-this-repo"][0]["id"], "kept"
         )
 
+    def test_main_succeeds_when_all_discovered_repositories_are_excluded(self):
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(
+            once=True,
+            run_budget=0,
+            base_url="https://app.all-hands.dev",
+            idle_timeout=900,
+            min_nudge_interval=1800,
+            max_stalled_nudges=4,
+            verbose=False,
+        )
+
+        def collect_groups(*_args, excluded_repositories=None, **_kwargs):
+            excluded_repositories.add("example-org/skip-this-repo")
+            return {}
+
+        with patch.dict("os.environ", {"OPENHANDS_API_KEY": "test-key"}):
+            with patch.object(MODULE, "parse_args", return_value=args):
+                with patch.object(MODULE, "resolve_conversation_ids", return_value=[]):
+                    with patch.object(MODULE, "resolve_skip_ids", return_value=set()):
+                        with patch.object(
+                            MODULE,
+                            "resolve_skip_repositories",
+                            return_value={"example-org/skip-this-repo"},
+                        ):
+                            with patch.object(
+                                MODULE,
+                                "collect_conversation_groups",
+                                side_effect=collect_groups,
+                            ):
+                                with patch.object(MODULE, "write_step_summary") as summary:
+                                    MODULE.main()
+        summary.assert_called_once_with([])
+
     def test_only_newest_conversation_is_canonical_per_repository(self):
         groups = MODULE.group_conversations_by_repository([
             {"id":"old","selected_repository":"akukuusisto/tradefoundry","created_at":"2026-10-01T10:00:00Z","sandbox_status":"RUNNING"},
