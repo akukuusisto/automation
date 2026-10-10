@@ -95,6 +95,7 @@ class RepositorySelectionTests(unittest.TestCase):
             )
 
     def test_skip_repository_excludes_all_conversations_case_insensitively(self):
+        excluded = set()
         groups = MODULE.group_conversations_by_repository(
             [
                 {
@@ -117,7 +118,9 @@ class RepositorySelectionTests(unittest.TestCase):
                 },
             ],
             skip_repositories={" EXAMPLE-ORG/SKIP-THIS-REPO/ "},
+            excluded_repositories=excluded,
         )
+        self.assertEqual(excluded, {"example-org/skip-this-repo"})
         self.assertNotIn("example-org/skip-this-repo", groups)
         self.assertEqual(
             groups["example-org/keep-this-repo"][0]["id"], "kept"
