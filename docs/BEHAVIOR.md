@@ -10,15 +10,20 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 
 1. Discover available conversations (or use seed IDs from secrets).
 2. Group by `selected_repository`.
-3. The **newest** conversation (by `created_at`) is canonical.
-4. If the newest conversation's sandbox is `MISSING`, the **newest conversation
-   that still has a sandbox** becomes canonical instead. A dead conversation must
-   not keep a repository stuck in a permanent recovery loop.
-5. Loss recovery runs only when **every** candidate for that repository is
-   `MISSING` (or not found): reuse the newest older conversation, or start a new
-   one when no reusable conversation exists and no recent start-task is active.
-6. A conversation that is resumed or replaced automatically becomes canonical on
-   the next run, because it is the newest candidate with a live sandbox.
+3. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
+   or `STARTING`).
+4. A conversation with sandbox `ERROR` is not considered usable when another
+   candidate has a non-error, non-missing sandbox. This keeps a broken newest
+   conversation from masking an older working one.
+5. If no usable candidate exists, try the newest non-missing conversation so the
+   recovery path can attempt to repair it; only use a `MISSING` candidate when
+   every candidate is missing.
+6. Loss recovery runs when the selected conversation is missing, not found,
+   stalled, or unable to accept a nudge. Reuse an older conversation where possible,
+   or start a replacement when no reusable conversation exists and no recent
+   start-task is active.
+7. A conversation that is resumed or replaced automatically becomes canonical on
+   the next run when its sandbox is usable.
 
 ## Nudge rules
 
@@ -143,8 +148,9 @@ ready. Therefore:
   4 were schedule-triggered and 96 came from an external `workflow_dispatch`.
   The real cadence comes from an external timer (cron-job.org) hitting the
   dispatch API. That timer is **not** stored in this repository.
-- `keepalive-deadman.yml` is the dead-man's switch: it fails when no successful
-  keepalive run completed within the last ~45 minutes. Because the dead-man also
+- `keepalive-deadman.yml` is the dead-man's switch: it checks the newest
+  `workflow_dispatch` run, fails if that completed run was unsuccessful, and
+  fails if the dispatch is older than ~45 minutes. Because the dead-man also
   relies on GitHub's schedule, cron-job.org should additionally alert when a
   dispatch fails.
 - `OPENHANDS_RUN_BUDGET_SECONDS` bounds a `--once` run. Discovery pagination,
@@ -163,14 +169,18 @@ sections:
   alive while nothing could progress.
 
 Set `OPENHANDS_FAIL_ON_ATTENTION=true` to make the run fail when something needs a
-human.
+human. Set `OPENHANDS_FAIL_ON_RISK=true` to make the run fail when the final
+repository outcome is unresolved. A successfully recovered outcome such as
+`nudge-failed->running` is shown under Recovered and does not fail the run.
 
 ## Public repository
 
-Actions logs and step summaries of a public repository are public. By default the
-script redacts repository names (`repo#1`, `repo#2`, ...), conversation titles
-(`'<redacted>'`) and prints only the first 8 characters of a conversation UUID.
-`OPENHANDS_VERBOSE=1` disables redaction and is meant for local runs only.
+Actions logs and step summaries of a public repository are public. The script
+redacts repository names (`repo#1`, `repo#2`, ...), conversation titles
+(`'<redacted>'`) and prints at most the first 8 characters of conversation/task
+identifiers. API response bodies, exception messages, event payloads, and start-task
+error details are never printed. `OPENHANDS_VERBOSE=1` may be used locally but is
+forcibly ignored inside GitHub Actions.
 
 ## Environment variables
 

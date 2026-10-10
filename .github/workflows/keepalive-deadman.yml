@@ -1,6 +1,6 @@
 name: keepalive-deadman
 
-# Valvoo, että openhands-keepalive on oikeasti ajanut viimeisen 45 minuutin
+# Valvoo, että keepalive-dispatch on tuottanut ajon viimeisen 45 minuutin
 # aikana. Tämä on turvaverkko sille, että ajastus (cron-job.org-dispatch ja
 # GitHubin oma schedule) voi kuolla hiljaa: ilman tätä kukaan ei huomaa, että
 # agentit ovat pysähtyneet, koska epäonnistuneita ajoja ei synny lainkaan.
@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       max-age-minutes:
-        description: "Suurin sallittu ikä viimeisimmälle onnistuneelle keepalive-ajolle"
+        description: "Suurin sallittu ikä viimeisimmälle keepalive-dispatch-ajolle"
         required: false
         default: "45"
         type: string
@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Check the latest successful keepalive run
+      - name: Check the latest keepalive dispatch
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,23 +48,30 @@ jobs:
           set -euo pipefail
           max_age="${MAX_AGE_MINUTES:-45}"
           latest="$(gh run list \
+            --repo akukuusisto/automation \
             --workflow=openhands-keepalive.yml \
-            --status success \
-            --limit 40 \
-            --json createdAt \
-            --jq '.[].createdAt' | sort | tail -n 1)"
+            --event workflow_dispatch \
+            --limit 1 \
+            --json createdAt,status,conclusion,url \
+            --jq '.[0] | [.createdAt, .status, (.conclusion // ""), .url] | @tsv')"
 
           if [ -z "$latest" ]; then
-            echo "::error::Yhtään onnistunutta openhands-keepalive-ajoa ei löytynyt."
+            echo "::error::Yhtään workflow_dispatch keepalive-ajoa ei löytynyt."
             exit 1
           fi
 
-          latest_epoch="$(date -u -d "$latest" +%s)"
+          IFS=$'\t' read -r created_at status conclusion run_url <<< "$latest"
+          latest_epoch="$(date -u -d "$created_at" +%s)"
           now_epoch="$(date -u +%s)"
           age_minutes=$(( (now_epoch - latest_epoch) / 60 ))
-          echo "Viimeisin onnistunut keepalive-ajo: ${age_minutes} min sitten (${latest})."
+          echo "Viimeisimmän keepalive-ajon ikä: ${age_minutes} min; status=${status}; conclusion=${conclusion:-pending}."
+
+          if [ "$status" = "completed" ] && [ "$conclusion" != "success" ]; then
+            echo "::error::Viimeisin keepalive-ajo epäonnistui. Tarkista Actions-yhteenveto: ${run_url}"
+            exit 1
+          fi
 
           if [ "$age_minutes" -gt "$max_age" ]; then
-            echo "::error::openhands-keepalive ei ole ajanut ${max_age} minuuttiin (viimeisin ${age_minutes} min). Tarkista cron-job.org-dispatch ja Actions-ajot."
+            echo "::error::Keepalive-dispatch ei ole tuottanut tuoretta ajoa ${max_age} minuuttiin. Tarkista ulkoinen ajastus ja Actions-ajot."
             exit 1
           fi

@@ -112,13 +112,17 @@ jobs:
           # Aseta "true", jos haluat että ajo epäonnistuu kun jokin conversation
           # tarvitsee ihmisen (waiting_for_confirmation).
           OPENHANDS_FAIL_ON_ATTENTION: "false"
+          # A green run means every repository ended in a healthy or recovered state.
+          OPENHANDS_FAIL_ON_RISK: "true"
+          # Defence in depth: verbose output is disabled in public Actions logs.
+          OPENHANDS_VERBOSE: "false"
           # Pidä conversation-otsikot muodossa "repo: ..." (ilman omistajaa),
           # jotta UI:sta näkee yhdellä silmäyksellä mikä repo on työstössä.
           OPENHANDS_TITLE_SYNC: "true"
-          # Resume on asynkroninen: odota enintaan 30 s (3 s välein) että sandbox
+          # Resume on asynkroninen: odota enintään 90 s (5 s välein), että sandbox
           # ehtii RUNNING-tilaan ennen kuin conversationia käytetään uudelleen.
-          OPENHANDS_RESUME_WAIT_SECONDS: "30"
-          OPENHANDS_RESUME_POLL_INTERVAL: "3"
+          OPENHANDS_RESUME_WAIT_SECONDS: "90"
+          OPENHANDS_RESUME_POLL_INTERVAL: "5"
           OPENHANDS_DRY_RUN: ${{ inputs.dry-run || false }}
           # schedule -> always discover; workflow_dispatch respects the discover input
           OPENHANDS_AUTO_DISCOVER: ${{ github.event_name == 'schedule' || inputs.discover }}

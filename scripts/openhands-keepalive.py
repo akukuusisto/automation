@@ -38,7 +38,7 @@ class ConversationNotFound(RuntimeError):
 
 
 # outcome-luokat: mik\u00e4 vaatii palautuksen, mik\u00e4 n\u00e4kyy ihmiselle
-RECOVERY_OUTCOMES = ("sandbox-missing", "not-found", "stalled")
+RECOVERY_OUTCOMES = ("sandbox-missing", "not-found", "stalled", "nudge-failed", "starting-stuck", "not-running")
 TERMINAL_OUTCOMES = (
     "done",
     "stalled",
@@ -59,6 +59,11 @@ AT_RISK_OUTCOMES = {
     "not-found",
     "budget-exhausted",
     "idle-unknown",
+    "resume-failed",
+    "resuming",
+    "replacement-start-skipped",
+    "starting-stuck",
+    "not-running",
 }
 TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
 # 404/410 send-messagesta tarkoittaa ett\u00e4 conversation on arkistoitu tai
@@ -103,6 +108,21 @@ def outcome_parts(outcome: str):
 def outcome_matches(outcome: str, candidates) -> bool:
     """Osuuko yksikin outcome-osa annettuun joukkoon?"""
     return any(part in candidates for part in outcome_parts(outcome))
+
+
+def final_outcome(outcome: str) -> str:
+    """Return the final state after any attempted recovery chain."""
+    parts = outcome_parts(outcome)
+    return parts[-1] if parts else ""
+
+
+def safe_error_label(exc: Exception) -> str:
+    """Describe an error without exposing API bodies, URLs, IDs, or user data."""
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        return f"HTTP {status_code}"
+    return type(exc).__name__
 
 
 def label_title(title) -> str:
@@ -194,9 +214,9 @@ def sync_conversation_title(
                 f"title={label_title(desired)}"
             )
             return True
-        print(f"  otsikon p\u00e4ivitys -> {response.status_code}: {response.text[:200]}")
+        print(f"  otsikon päivitys -> HTTP {response.status_code}")
     except Exception as exc:
-        print(f"  otsikon p\u00e4ivitys ep\u00e4onnistui: {exc}")
+        print(f"  otsikon päivitys ep\u00e4onnistui: {safe_error_label(exc)}")
     return False
 
 
@@ -298,6 +318,12 @@ def parse_args():
         action="store_true",
         default=_env_bool("OPENHANDS_FAIL_ON_ATTENTION"),
         help="Palauta virhe jos jokin conversation vaatii ihmisen",
+    )
+    parser.add_argument(
+        "--fail-on-risk",
+        action="store_true",
+        default=_env_bool("OPENHANDS_FAIL_ON_RISK"),
+        help="Fail the run if any repository remains in an unresolved risk state",
     )
     parser.add_argument(
         "--title-sync",
@@ -405,7 +431,7 @@ def discover_conversations(base_url, headers, limit=50, max_pages=100):
             # Osittainen tulos on paljon parempi kuin tyhj\u00e4: yksi hidas tai
             # ep\u00e4onnistunut sivu ei saa pudottaa koko fleeti\u00e4.
             print(
-                f"  discover: sivu {page} ep\u00e4onnistui ({exc}) -> jatketaan "
+                f"  discover: sivu {page} ep\u00e4onnistui ({safe_error_label(exc)}) -> jatketaan "
                 f"{len(all_items)} l\u00f6ydetyll\u00e4 conversationilla"
             )
             break
@@ -467,20 +493,23 @@ def group_conversations_by_repository(items, skip_ids=None):
 
 
 def select_latest_per_repository(groups):
-    """Return exactly one canonical candidate for each repository.
+    """Choose the newest usable conversation, falling back to recoverable errors.
 
-    The newest conversation is canonical. If its sandbox is MISSING, the newest
-    conversation that still has a sandbox wins instead: a dead conversation must
-    not keep the repository in a permanent recovery loop. Only when every
-    candidate is MISSING does the newest one stay canonical, which is exactly
-    when loss recovery is genuinely needed.
+    A newer ERROR sandbox must not mask an older RUNNING/PAUSED/STARTING one.
+    If no usable candidate exists, retain the newest non-missing candidate so
+    the regular recovery path can attempt repair or replace it.
     """
     selected = {}
     for repository, candidates in groups.items():
         if not candidates:
             continue
-        live = [c for c in candidates if c.get("sandbox_status") != "MISSING"]
-        selected[repository] = (live or candidates)[0]
+        # Prefer the newest operational conversation over a newer ERROR session.
+        usable = [
+            c for c in candidates
+            if c.get("sandbox_status") in ("RUNNING", "PAUSED", "STARTING")
+        ]
+        present = [c for c in candidates if c.get("sandbox_status") != "MISSING"]
+        selected[repository] = (usable or present or candidates)[0]
     return selected
 
 
@@ -635,7 +664,7 @@ def fetch_recent_events(base_url, headers, conversation_id, limit=20):
             return []
         return payload if isinstance(payload, list) else []
     except Exception as exc:
-        print(f"  event-haku ep\u00e4onnistui: {exc}")
+        print(f"  event-haku ep\u00e4onnistui: {safe_error_label(exc)}")
         return None
 
 
@@ -660,10 +689,10 @@ def try_resume(base_url, headers, sandbox_id, dry_run):
         return True
     try:
         r = requests.post(f"{base_url}/api/v1/sandboxes/{sandbox_id}/resume", headers=headers, timeout=30)
-        print(f"  resume -> {r.status_code} {r.text[:200]}")
+        print(f"  resume -> HTTP {r.status_code}")
         return r.status_code < 300
     except Exception as exc:
-        print(f"  resume ep\u00e4onnistui: {exc}")
+        print(f"  resume ep\u00e4onnistui: {safe_error_label(exc)}")
         return False
 
 
@@ -686,7 +715,7 @@ def wait_for_resumed_sandbox(base_url, headers, conversation_id, sandbox_id, tim
             print(f"  resume wait: conversation {conversation_id[:8]} disappeared")
             return False
         except requests.RequestException as exc:
-            print(f"  resume wait -haku ep\u00e4onnistui: {exc}")
+            print(f"  resume wait -haku ep\u00e4onnistui: {safe_error_label(exc)}")
             return False
 
         sandbox_status = conversation.get("sandbox_status")
@@ -738,9 +767,9 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
                 json=payload,
             )
             if r.status_code < 300:
-                print(f"  send-message OK: {r.text[:200]}")
+                print(f"  send-message OK (HTTP {r.status_code})")
                 return True
-            print(f"  send-message -> {r.status_code}: {r.text[:200]}")
+            print(f"  send-message -> HTTP {r.status_code}")
             last_status = r.status_code
             if attempt == 1 and r.status_code in TRANSIENT_STATUSES:
                 delay = parse_retry_after(getattr(r, "headers", None))
@@ -752,7 +781,7 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
                     time.sleep(delay)
                     continue
         except Exception as exc:
-            print(f"  send-message virhe: {exc}")
+            print(f"  send-message virhe: {safe_error_label(exc)}")
         break
 
     # Arkistoitu tai poistettu conversation: sandboxia ei ole en\u00e4\u00e4 olemassa,
@@ -780,7 +809,7 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
             json=payload,
         )
         if r.status_code < 300:
-            print(f"  runtime events OK: {r.text[:200]}")
+            print(f"  runtime events OK (HTTP {r.status_code})")
             try:
                 rr = requests.post(
                     f"{conv_url}/run",
@@ -791,10 +820,10 @@ def send_nudge(base_url, headers, conversation_id, text, dry_run, conversation=N
             except Exception:
                 pass
             return True
-        print(f"  runtime events -> {r.status_code}: {r.text[:200]}")
+        print(f"  runtime events -> HTTP {r.status_code}")
         return False
     except Exception as exc:
-        print(f"  runtime fallback virhe: {exc}")
+        print(f"  runtime fallback virhe: {safe_error_label(exc)}")
         return False
 
 
@@ -833,7 +862,7 @@ def start_conversation(base_url, headers, repository, text, dry_run, poll_attemp
         task_id = task.get("id")
         conversation_id = task.get("app_conversation_id")
         status = task.get("status")
-        print(f"  start -> status={status} task={task_id or '-'} conversation={conversation_id or '-'}")
+        print(f"  start -> status={status} task={label_conversation(task_id)} conversation={label_conversation(conversation_id)}")
 
         if conversation_id:
             return conversation_id
@@ -861,15 +890,15 @@ def start_conversation(base_url, headers, repository, text, dry_run, poll_attemp
             conversation_id = item.get("app_conversation_id")
             print(f"  start-task poll {attempt + 1}/{poll_attempts}: {status}")
             if status == "READY" and conversation_id:
-                print(f"  uusi conversation valmis: {conversation_id}")
+                print(f"  uusi conversation valmis: {label_conversation(conversation_id)}")
                 return conversation_id
             if status == "ERROR":
-                print(f"  start-task ERROR: {item.get('error', 'Unknown error')}")
+                print("  start-task ERROR (details redacted)")
                 return None
         print("  start-task timeout; uusi conversation valmistuu mahdollisesti myöhemmin")
         return None
     except requests.RequestException as exc:
-        print(f"  start epäonnistui: {exc}")
+        print(f"  start ep\u00e4onnistui: {safe_error_label(exc)}")
         return None
 
 
@@ -960,7 +989,7 @@ def has_recent_start_task(
         return False
     except Exception as exc:
         print(
-            f"  start-task-haku epäonnistui: {exc} -> "
+            f"  start-task-haku epäonnistui: {safe_error_label(exc)} -> "
             "oletetaan start olevan mahdollinen ja estetään uusi"
         )
         return True
@@ -1024,7 +1053,7 @@ def check_conversation(base_url, headers, conv_id, args, state):
                         "  Resume ei onnistunut -> "
                         "odotetaan seuraavaa keepalive-kierrosta"
                     )
-                    return "paused"
+                    return "resume-failed"
                 if dry_run:
                     print("  DRY-RUN: sandboxin palautumista ei odotettu")
                     return "resumed"
@@ -1083,6 +1112,17 @@ def check_conversation(base_url, headers, conv_id, args, state):
             return resume_prefix + "paused"
 
         if sandbox_status == "STARTING":
+            # Conversation age is not sandbox age: an old conversation can
+            # legitimately have a newly resumed sandbox. Use updated_at as the
+            # best available proxy for a recent state transition.
+            starting_since = parse_updated_at(conversation.get("updated_at", ""))
+            startup_timeout = max(600, getattr(args, "resume_wait_seconds", 90) * 2)
+            if starting_since and now - starting_since >= startup_timeout:
+                print(
+                    f"  Sandbox STARTING yli {startup_timeout}s -> "
+                    "recoveroidaan jumittunut käynnistys"
+                )
+                return "starting-stuck"
             return "starting"
         if sandbox_status not in ("RUNNING", "ERROR"):
             return "not-running"
@@ -1128,13 +1168,13 @@ def check_conversation(base_url, headers, conv_id, args, state):
         print(f"  Conversation {label_conversation(conv_id)} ei en\u00e4\u00e4 l\u00f6ydy -> fallback sallittu")
         return "not-found"
     except requests.HTTPError as exc:
-        print(f"  HTTP-virhe: {exc}")
+        print(f"  HTTP-virhe: {safe_error_label(exc)}")
         return "http-error"
     except requests.RequestException as exc:
-        print(f"  Network-virhe: {exc}")
+        print(f"  Network-virhe: {safe_error_label(exc)}")
         return "net-error"
     except Exception as exc:
-        print(f"  Virhe: {exc}")
+        print(f"  Virhe: {safe_error_label(exc)}")
         return "error"
 
 
@@ -1225,7 +1265,7 @@ def collect_conversation_groups(base_url, headers, args, seed_ids, skip_ids):
         except requests.RequestException as exc:
             print(
                 f"  seed conversation -haku ep\u00e4onnistui "
-                f"{label_conversation(cid)}: {exc}"
+                f"{label_conversation(cid)}: {safe_error_label(exc)}"
             )
 
     return group_conversations_by_repository(items, skip_ids=skip_ids)
@@ -1255,9 +1295,11 @@ def write_step_summary(results):
             "Summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         )
 
-        at_risk = [(r, c, o) for r, c, o in results if outcome_matches(o, AT_RISK_OUTCOMES)]
+        at_risk = [
+            (r, c, o) for r, c, o in results if final_outcome(o) in AT_RISK_OUTCOMES
+        ]
         needs_human = [
-            (r, c, o) for r, c, o in results if outcome_matches(o, NEEDS_HUMAN_OUTCOMES)
+            (r, c, o) for r, c, o in results if final_outcome(o) in NEEDS_HUMAN_OUTCOMES
         ]
 
         for title, entries in (
@@ -1275,16 +1317,32 @@ def write_step_summary(results):
                     f"`{label_conversation(cid) if cid else '-'}` -> `{outcome}`"
                 )
 
+        recovered = [
+            (r, c, o) for r, c, o in results
+            if len(outcome_parts(o)) > 1 and final_outcome(o) not in AT_RISK_OUTCOMES
+        ]
+        lines.append("")
+        lines.append(f"**Recovered ({len(recovered)})**")
+        if not recovered:
+            lines.append("- none")
+        else:
+            for repository, cid, outcome in recovered:
+                lines.append(
+                    f"- `{label_repository(repository)}` / "
+                    f"`{label_conversation(cid) if cid else '-'}` -> `{outcome}`"
+                )
+
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
     except Exception as exc:
-        print(f"  step summary ep\u00e4onnistui: {exc}")
+        print(f"  step summary ep\u00e4onnistui: {safe_error_label(exc)}")
 
 
 def main():
     global VERBOSE
     args = parse_args()
-    VERBOSE = bool(args.verbose)
+    # GitHub Actions logs are public; never allow verbose output there.
+    VERBOSE = bool(args.verbose) and os.getenv("GITHUB_ACTIONS", "").lower() != "true"
     api_key = os.getenv("OPENHANDS_API_KEY", "").strip()
     if not api_key:
         print("OPENHANDS_API_KEY puuttuu", file=sys.stderr)
@@ -1376,7 +1434,7 @@ def main():
                 f"{label_conversation(cid) if cid else '-'} -> {outcome}"
             )
         attention = [
-            row for row in results if outcome_matches(row[2], NEEDS_HUMAN_OUTCOMES)
+            row for row in results if final_outcome(row[2]) in NEEDS_HUMAN_OUTCOMES
         ]
         if attention and args.fail_on_attention:
             print(
@@ -1385,6 +1443,16 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(3)
+        at_risk = [
+            row for row in results if final_outcome(row[2]) in AT_RISK_OUTCOMES
+        ]
+        if at_risk and args.fail_on_risk:
+            print(
+                f"  {len(at_risk)} repositoriota jäi riskitilaan -> "
+                "keepalive-ajo epäonnistuu, jotta valvonta hälyttää.",
+                file=sys.stderr,
+            )
+            sys.exit(4)
         return
 
     active = [

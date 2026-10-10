@@ -90,6 +90,16 @@ class RepositorySelectionTests(unittest.TestCase):
         self.assertEqual(latest["akukuusisto/tradefoundry"]["id"], "new")
         self.assertEqual(latest["akukuusisto/accounter"]["id"], "other")
 
+    def test_newest_error_prefers_older_usable_conversation(self):
+        groups = MODULE.group_conversations_by_repository([
+            {"id": "older-running", "selected_repository": "org/example",
+             "created_at": "2026-10-01T10:00:00Z", "sandbox_status": "RUNNING"},
+            {"id": "newer-error", "selected_repository": "org/example",
+             "created_at": "2026-10-03T10:00:00Z", "sandbox_status": "ERROR"},
+        ])
+        selected = MODULE.select_latest_per_repository(groups)
+        self.assertEqual(selected["org/example"]["id"], "older-running")
+
     def test_created_at_not_updated_at_defines_newest(self):
         groups = MODULE.group_conversations_by_repository([
             {"id":"older-created","selected_repository":"akukuusisto/accounter","created_at":"2026-10-01T10:00:00Z","updated_at":"2026-10-03T10:00:00Z","sandbox_status":"RUNNING"},
@@ -569,13 +579,36 @@ class NudgeHygieneTests(unittest.TestCase):
         self.assertEqual(outcome, "resumed->stalled")
         self.assertEqual(calls, [])
 
-    def test_paused_resume_failure_stays_paused_without_nudging(self):
+    def test_paused_resume_failure_is_reported_without_nudging(self):
         outcome, calls = self._run(
             self._conversation(sandbox_status="PAUSED", execution_status=None),
             events=[agent_event()],
             resume=False,
         )
-        self.assertEqual(outcome, "paused")
+        self.assertEqual(outcome, "resume-failed")
+        self.assertEqual(calls, [])
+
+    def test_old_starting_sandbox_is_a_recovery_outcome(self):
+        conversation = self._conversation(
+            sandbox_status="STARTING",
+            execution_status=None,
+            created_at="2026-10-01T10:00:00Z",
+            updated_at="2026-10-01T10:00:00Z",
+        )
+        outcome, calls = self._run(conversation, events=[])
+        self.assertEqual(outcome, "starting-stuck")
+        self.assertTrue(MODULE.outcome_matches(outcome, MODULE.RECOVERY_OUTCOMES))
+        self.assertEqual(calls, [])
+
+    def test_old_conversation_with_recent_starting_transition_is_not_replaced(self):
+        conversation = self._conversation(
+            sandbox_status="STARTING",
+            execution_status=None,
+            created_at="2026-10-01T10:00:00Z",
+            updated_at=MODULE.datetime.datetime.now(MODULE.datetime.timezone.utc).isoformat(),
+        )
+        outcome, calls = self._run(conversation, events=[])
+        self.assertEqual(outcome, "starting")
         self.assertEqual(calls, [])
 
     def test_paused_with_unmeasurable_idle_is_still_nudged(self):
@@ -701,7 +734,7 @@ class StepSummaryRedactionTests(unittest.TestCase):
         self.assertIn("Needs human (1)", summary)
         self.assertIn("At risk (0)", summary)
 
-    def test_combined_outcome_still_shows_up_at_risk(self):
+    def test_successfully_recovered_outcome_is_not_currently_at_risk(self):
         import os
         import tempfile
 
@@ -722,7 +755,8 @@ class StepSummaryRedactionTests(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             summary = fh.read()
         os.unlink(path)
-        self.assertIn("At risk (1)", summary)
+        self.assertIn("At risk (0)", summary)
+        self.assertIn("Recovered (1)", summary)
         self.assertIn("stalled->sandbox-replaced", summary)
 
     def test_stalled_conversation_shows_up_at_risk(self):
@@ -748,6 +782,21 @@ class StepSummaryRedactionTests(unittest.TestCase):
 
 
 class OutcomeMatchingTests(unittest.TestCase):
+    def test_nudge_failure_is_recoverable_and_final_state_is_used(self):
+        self.assertTrue(MODULE.outcome_matches("nudge-failed", MODULE.RECOVERY_OUTCOMES))
+        self.assertEqual(MODULE.final_outcome("nudge-failed->running"), "running")
+        self.assertEqual(MODULE.final_outcome("nudge-failed->replacement-failed"),
+                         "replacement-failed")
+
+    def test_safe_error_label_never_exposes_exception_text(self):
+        error = RuntimeError("private repository name, URL, and response body")
+        self.assertEqual(MODULE.safe_error_label(error), "RuntimeError")
+        response = type("Response", (), {"status_code": 503, "text": "private payload"})()
+        http_error = type("HTTPError", (RuntimeError,), {"response": response})(
+            "private URL and payload"
+        )
+        self.assertEqual(MODULE.safe_error_label(http_error), "HTTP 503")
+
     def test_combined_outcome_matches_each_part(self):
         self.assertTrue(
             MODULE.outcome_matches("stalled->sandbox-replaced", MODULE.AT_RISK_OUTCOMES)
@@ -1242,9 +1291,9 @@ class ResumeRecoveryTests(unittest.TestCase):
         self.assertEqual(outcome, "resuming")
         self.assertEqual(calls, [])
 
-    def test_failed_resume_stays_paused_without_nudging(self):
+    def test_failed_resume_reports_failure_without_nudging(self):
         outcome, calls = self._run(self._args(), ["PAUSED"], resume=False)
-        self.assertEqual(outcome, "paused")
+        self.assertEqual(outcome, "resume-failed")
         self.assertEqual(calls, [])
 
     def test_dry_run_resume_is_not_waited_on(self):
