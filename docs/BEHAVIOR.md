@@ -9,8 +9,11 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 ## Selection rules
 
 1. Discover available conversations (or use seed IDs from secrets).
-2. Group by `selected_repository`.
-3. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
+2. Exclude every repository listed in the optional `OPENHANDS_SKIP_REPOSITORIES`
+   secret (case-insensitive, comma-separated), including all its conversations.
+   Excluded repositories are not nudged, recovered, or replaced.
+3. Group by `selected_repository`.
+4. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
    or `STARTING`).
 4. A conversation with sandbox `ERROR` is not considered usable when another
    candidate has a non-error, non-missing sandbox. This keeps a broken newest
@@ -189,6 +192,7 @@ forcibly ignored inside GitHub Actions.
 | `OPENHANDS_API_KEY` | — | required |
 | `OPENHANDS_CONVERSATION_IDS` | — | seed IDs / bootstrap scope |
 | `OPENHANDS_SKIP_IDS` | — | conversations to ignore |
+| `OPENHANDS_SKIP_REPOSITORIES` | — | optional comma-separated `owner/repo` denylist; excluded repositories are never managed |
 | `OPENHANDS_NUDGE` | built-in | override nudge text |
 | `OPENHANDS_NUDGE_MODE` | `loop` | `loop` (never stops) or `task` (`DONE` stops) |
 | `OPENHANDS_IDLE_TIMEOUT` | `900` | idle seconds before a nudge is considered |
