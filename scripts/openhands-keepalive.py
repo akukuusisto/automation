@@ -504,10 +504,12 @@ def group_conversations_by_repository(
         cid = (item.get("id") or "").strip()
         repository = _repository_from_conversation(item)
         normalized_repository = normalize_repository_name(repository)
-        if not cid or not repository or cid in skip_ids:
+        if not cid or not repository:
             continue
         if normalized_repository in skip_repositories:
             excluded_repositories.add(normalized_repository)
+            continue
+        if cid in skip_ids:
             continue
         groups.setdefault(repository, []).append(item)
 
