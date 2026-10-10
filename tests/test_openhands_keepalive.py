@@ -593,10 +593,22 @@ class NudgeHygieneTests(unittest.TestCase):
             sandbox_status="STARTING",
             execution_status=None,
             created_at="2026-10-01T10:00:00Z",
+            updated_at="2026-10-01T10:00:00Z",
         )
         outcome, calls = self._run(conversation, events=[])
         self.assertEqual(outcome, "starting-stuck")
         self.assertTrue(MODULE.outcome_matches(outcome, MODULE.RECOVERY_OUTCOMES))
+        self.assertEqual(calls, [])
+
+    def test_old_conversation_with_recent_starting_transition_is_not_replaced(self):
+        conversation = self._conversation(
+            sandbox_status="STARTING",
+            execution_status=None,
+            created_at="2026-10-01T10:00:00Z",
+            updated_at=MODULE.datetime.datetime.now(MODULE.datetime.timezone.utc).isoformat(),
+        )
+        outcome, calls = self._run(conversation, events=[])
+        self.assertEqual(outcome, "starting")
         self.assertEqual(calls, [])
 
     def test_paused_with_unmeasurable_idle_is_still_nudged(self):
