@@ -16,6 +16,7 @@ name: openhands-keepalive
 #   OPENHANDS_API_KEY            required
 #   OPENHANDS_CONVERSATION_IDS   seed IDs / bootstrap scope
 #   OPENHANDS_SKIP_IDS           optional
+#   OPENHANDS_SKIP_REPOSITORIES  optional comma-separated owner/repo denylist
 #   OPENHANDS_NUDGE              optional override text
 #
 # External cron example (workflow_dispatch):
@@ -97,6 +98,7 @@ jobs:
           OPENHANDS_API_KEY: ${{ secrets.OPENHANDS_API_KEY }}
           OPENHANDS_CONVERSATION_IDS: ${{ secrets.OPENHANDS_CONVERSATION_IDS }}
           OPENHANDS_SKIP_IDS: ${{ secrets.OPENHANDS_SKIP_IDS }}
+          OPENHANDS_SKIP_REPOSITORIES: ${{ secrets.OPENHANDS_SKIP_REPOSITORIES }}
           OPENHANDS_NUDGE: ${{ secrets.OPENHANDS_NUDGE }}
           OPENHANDS_NUDGE_MODE: "loop"
           OPENHANDS_IDLE_TIMEOUT: "900"
