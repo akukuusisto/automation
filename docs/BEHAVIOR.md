@@ -148,8 +148,9 @@ ready. Therefore:
   4 were schedule-triggered and 96 came from an external `workflow_dispatch`.
   The real cadence comes from an external timer (cron-job.org) hitting the
   dispatch API. That timer is **not** stored in this repository.
-- `keepalive-deadman.yml` is the dead-man's switch: it fails when no successful
-  keepalive run completed within the last ~45 minutes. Because the dead-man also
+- `keepalive-deadman.yml` is the dead-man's switch: it checks the newest
+  `workflow_dispatch` run, fails if that completed run was unsuccessful, and
+  fails if the dispatch is older than ~45 minutes. Because the dead-man also
   relies on GitHub's schedule, cron-job.org should additionally alert when a
   dispatch fails.
 - `OPENHANDS_RUN_BUDGET_SECONDS` bounds a `--once` run. Discovery pagination,
