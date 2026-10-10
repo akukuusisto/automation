@@ -119,7 +119,7 @@ jobs:
           # Pidä conversation-otsikot muodossa "repo: ..." (ilman omistajaa),
           # jotta UI:sta näkee yhdellä silmäyksellä mikä repo on työstössä.
           OPENHANDS_TITLE_SYNC: "true"
-          # Resume on asynkroninen: odota enintaan 30 s (3 s välein) että sandbox
+          # Resume on asynkroninen: odota enintään 90 s (5 s välein), että sandbox
           # ehtii RUNNING-tilaan ennen kuin conversationia käytetään uudelleen.
           OPENHANDS_RESUME_WAIT_SECONDS: "90"
           OPENHANDS_RESUME_POLL_INTERVAL: "5"
