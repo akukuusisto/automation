@@ -242,25 +242,45 @@ def budget_remaining() -> float:
 
 
 DEFAULT_NUDGE_LOOP = (
-    "Jatka autonomista looppia ty\u00f6nkulkusi mukaan.\n\n"
-    "1) Tarkista nykyinen tila (git, avoimet ty\u00f6t, roadmap).\n"
-    "2) Jatka kesken olevaa ty\u00f6t\u00e4 ilman turhaa selittely\u00e4.\n"
-    "3) Ennen uuden ty\u00f6n aloittamista tarkista git, avoimet PR:t ja issue-ty\u00f6 "
-    "sek\u00e4 varmista, ettei toinen agentti tee samaa ty\u00f6t\u00e4. V\u00e4lt\u00e4 duplikaatit.\n"
-    "4) Jos nykyiset teht\u00e4v\u00e4t loppuvat: ota lis\u00e4\u00e4 t\u00f6it\u00e4 roadmapilta "
-    "tai avoimista issueista (kun s\u00e4\u00e4nn\u00f6t sen sallivat).\n"
-    "5) Jos roadmap ja issuet ovat tyhjät: aloita itse uusi feature tai "
-    "merkittävä parannus, joka vie sovellusta eteenpäin. Valitse se, mikä on "
-    "käyttäjälle arvokkain, ja perustele lyhyesti miksi.\n"
-    "6) Vasta jos sovellus on mielestäsi käytännössä valmis eikä järkevää "
-    "uutta tekemistä ole: valitse itse aihe, jonka koet tärkeäksi ja jota ei "
-    "ole vielä käsitelty, tutki se huolellisesti ja kirjaa tulokset sekä "
-    "suositukset uuteen PR:ään. Älä mergaa sitä: jätä PR ihmisen "
-    "tutkittavaksi ja arvioitavaksi.\n"
-    "7) Pushaa muutokset normaalilla kadenssilla. Älä mergaa suojattuihin "
-    "haaroihin ilman erillistä ohjetta.\n\n"
+    "Jatka autonomista looppia työnkulkusi mukaan.\n\n"
+    "1) Tarkista nykyinen tila (git, avoimet työt, roadmap).\n"
+    "2) Tarkista tämän repositorion KAIKKI avoimet PR:t jokaisella kierroksella, "
+    "ei vain omiasi. Katselmoi diff, keskustelut ja review-kommentit, CI/required "
+    "checks, merge-konfliktit sekä PR:n tarkoitus. Arvioi koodi ja testit itse. "
+    "Korjaa agentin ratkaistavissa olevat puutteet PR:n omassa haarassa, vastaa "
+    "palautteeseen ja pushaa korjaus samaan PR:ään. Älä avaa päällekkäistä PR:ää.\n"
+    "3) Mergaa PR heti, kun se on katselmoitu, toteutus ja testit ovat kunnossa, "
+    "kaikki vaaditut tarkistukset ovat vihreinä, konflikteja tai ratkaisemattomia "
+    "muutosvaatimuksia ei ole ja repositorion suojaussäännöt sallivat mergaamisen. "
+    "Käytä repositorion normaalia merge-tapaa (ensisijaisesti squash, jos sallittu), "
+    "älä koskaan ohita vaadittuja checkejä, hyväksyntöjä tai branch protectionia. "
+    "Jos checkit ovat vielä käynnissä, jatka muuta työtä ja tarkista PR uudelleen "
+    "seuraavalla kierroksella. Mergetyn PR:n haara voidaan poistaa turvallisesti.\n"
+    "4) Jätä PR odottamaan ihmistä VAIN, jos siinä on selkeä ihmisblokkeri: esimerkiksi "
+    "label tai PR:n/kommentin eksplisiittinen ohje kuten human-only, needs-human, "
+    "do-not-merge tai päätös, joka vaatii ihmisen tuote-, tietoturva-, liiketoiminta- "
+    "tai manuaalisen hyväksynnän. Myös pakollinen ihmishyväksyntä tai ratkaisematon "
+    "ihmisen muutospyyntö estää mergaamisen. Dokumentoi täsmällinen blokkeri. "
+    "Älä tulkitse tavallista tarkistuspyyntöä automaattisesti ihmisblokkeriksi: "
+    "korjaa itse ratkaistavat asiat ja jatka. Tutkimus-/suositus-PR, joka on "
+    "tarkoituksella jätetty ihmisarvioon, kuuluu tähän poikkeukseen.\n"
+    "5) Jatka kesken olevaa varsinaista työtä ilman turhaa selittelyä. Ennen uuden "
+    "työn aloittamista tarkista issue-työ ja varmista, ettei toinen agentti tee samaa. "
+    "Vältä duplikaatit.\n"
+    "6) Jos nykyiset tehtävät loppuvat: ota lisää töitä roadmapilta tai avoimista "
+    "issueista (kun säännöt sen sallivat).\n"
+    "7) Jos roadmap ja issuet ovat tyhjät: aloita itse uusi feature tai merkittävä "
+    "parannus, joka vie sovellusta eteenpäin. Valitse käyttäjälle arvokkain ja "
+    "perustele lyhyesti miksi.\n"
+    "8) Vasta jos sovellus on mielestäsi käytännössä valmis eikä järkevää uutta "
+    "tekemistä ole: valitse tärkeä, vielä käsittelemätön aihe, tutki se huolellisesti "
+    "ja kirjaa tulokset sekä suositukset uuteen PR:ään. Merkitse se selvästi "
+    "ihmisarvioon jätettäväksi äläkä mergaa sitä.\n"
+    "9) Pushaa muutokset PR:n omaan haaraan. Älä koskaan tee suoria committeja "
+    "main-haaraan tai kierrä repositorion suojaussääntöjä.\n\n"
     "Looppi ei pysähdy. Älä vastaa pelkällä lopetusmerkillä: jos nykyinen työ "
-    "loppuu, siirry kohtaan 5 ja aloita uusi feature."
+    "loppuu, jatka avoimien PR:ien katselmoinnista ja siirry sitten seuraavaan "
+    "arvokkaaseen tehtävään."
 )
 
 DEFAULT_NUDGE_TASK = (
@@ -1161,7 +1181,7 @@ def check_conversation(base_url, headers, conv_id, args, state):
         if execution_status == "waiting_for_confirmation":
             return "confirmation"
 
-        if execution_status in ("finished", "idle", "stuck", "error", None):
+        if execution_status in ("paused", "finished", "idle", "stuck", "error", None):
             if idle_for is None:
                 print(
                     f"  Idle-aikaa ei voitu mitata "

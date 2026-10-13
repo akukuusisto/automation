@@ -33,7 +33,7 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 | Sandbox | Execution | Action |
 |---------|-----------|--------|
 | `RUNNING` | `running` | Leave alone |
-| `RUNNING` / `ERROR` | `finished` / `idle` / `stuck` / `error` / unknown | Nudge once idle passes the threshold |
+| `RUNNING` / `ERROR` | `paused` / `finished` / `idle` / `stuck` / `error` / unknown | Nudge once idle passes the threshold |
 | `PAUSED` | any | Resume (cooldown); after it is confirmed `RUNNING`, nudge in the same pass if the conversation was already past the idle threshold |
 | `MISSING` | any | Loss recovery (older conversation, or a new one) |
 | any | agent stopped in `task` mode with exactly `DONE` | Stop managing that conversation |
@@ -70,6 +70,29 @@ A nudge is only sent when idle exceeds **`max(idle-timeout, min-nudge-interval)`
 With the defaults (900s / 1800s) the same conversation is nudged at most once per
 30 minutes, even though the workflow runs roughly every 15 minutes. This is what
 stops an unmeasurable-idle conversation from being nudged on every single run.
+
+### Open pull request maintenance
+
+Every loop pass reviews **all open PRs in the current repository**, not only PRs
+created by the current agent. Review the diff, conversation/review feedback,
+CI and required checks, merge conflicts, and the PR's stated intent. Fix
+agent-resolvable issues in the PR's existing branch, reply to actionable
+feedback, and push the fix to the same PR rather than opening a duplicate.
+
+Merge when the implementation and tests are sound, all required checks pass,
+there are no unresolved change requests or conflicts, and repository protection
+rules permit the merge. Use the repository's normal merge strategy (prefer
+squash when available). Never bypass required checks, approvals, or branch
+protection. If checks are still pending, return to other work and re-check the
+PR on a later pass. Delete the merged branch when safe.
+
+Leave a PR open only for an explicit human blocker, such as a `human-only`,
+`needs-human`, or `do-not-merge` label/instruction; a decision requiring
+human product, security, or business judgement; a required human approval; or
+an unresolved human change request. State the exact blocker. Do not treat an
+ordinary review request as a human blocker when the agent can address it.
+Research/recommendation PRs deliberately left for human review are an explicit
+exception and must not be merged.
 
 ### Stalled escalation
 
