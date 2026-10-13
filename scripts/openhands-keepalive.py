@@ -1161,7 +1161,7 @@ def check_conversation(base_url, headers, conv_id, args, state):
         if execution_status == "waiting_for_confirmation":
             return "confirmation"
 
-        if execution_status in ("finished", "idle", "stuck", "error", None):
+        if execution_status in ("paused", "finished", "idle", "stuck", "error", None):
             if idle_for is None:
                 print(
                     f"  Idle-aikaa ei voitu mitata "
