@@ -502,6 +502,20 @@ class LoopContinuityTests(unittest.TestCase):
         # uusi feature -ohje on ennen tutkimusohjetta
         self.assertLess(lowered.index("uusi feature"), lowered.index("tutki se"))
 
+    def test_loop_nudge_reviews_open_prs_and_merges_unblocked_ready_prs(self):
+        text = MODULE.DEFAULT_NUDGE_LOOP
+        lowered = text.lower()
+        self.assertIn("kaikki avoimet pr:t", lowered)
+        self.assertIn("katselmoi diff", lowered)
+        self.assertIn("korjaa agentin ratkaistavissa olevat puutteet", lowered)
+        self.assertIn("mergaa pr", lowered)
+        self.assertIn("required checks", lowered)
+        self.assertIn("branch protection", lowered)
+        self.assertIn("human-only", lowered)
+        self.assertIn("ihmisblokkeri", lowered)
+        self.assertIn("tutkimus-/suositus-pr", lowered)
+        self.assertIn("älä koskaan tee suoria committeja", lowered)
+
     def test_legacy_stop_token_is_logged_but_not_treated_as_stop(self):
         events = [agent_event("LOOP-STOP")]
         self.assertTrue(MODULE.latest_agent_is_stop_token(events))
