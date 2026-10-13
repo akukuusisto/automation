@@ -33,7 +33,7 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 | Sandbox | Execution | Action |
 |---------|-----------|--------|
 | `RUNNING` | `running` | Leave alone |
-| `RUNNING` / `ERROR` | `finished` / `idle` / `stuck` / `error` / unknown | Nudge once idle passes the threshold |
+| `RUNNING` / `ERROR` | `paused` / `finished` / `idle` / `stuck` / `error` / unknown | Nudge once idle passes the threshold |
 | `PAUSED` | any | Resume (cooldown); after it is confirmed `RUNNING`, nudge in the same pass if the conversation was already past the idle threshold |
 | `MISSING` | any | Loss recovery (older conversation, or a new one) |
 | any | agent stopped in `task` mode with exactly `DONE` | Stop managing that conversation |
