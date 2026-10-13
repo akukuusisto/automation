@@ -337,6 +337,39 @@ class NudgeRecoveryTests(unittest.TestCase):
             MODULE.latest_activity_ts = original_activity
             MODULE.send_nudge = original_nudge
 
+    def test_running_sandbox_with_paused_execution_is_nudged(self):
+        """A live sandbox with a paused execution is stopped, not healthy/unknown."""
+        original_get = MODULE.get_conversation
+        original_activity = MODULE.latest_activity_ts
+        original_nudge = MODULE.send_nudge
+        try:
+            MODULE.get_conversation = lambda *args: {
+                "sandbox_status": "RUNNING",
+                "execution_status": "paused",
+                "updated_at": "2026-10-01T10:00:00Z",
+                "title": "paused agent",
+                "sandbox_id": "sandbox-paused-exec",
+            }
+            MODULE.latest_activity_ts = lambda *args: MODULE.time.time() - 3600
+            calls = []
+            MODULE.send_nudge = lambda *args: calls.append(args) or True
+
+            outcome = MODULE.check_conversation(
+                "https://app.all-hands.dev",
+                {},
+                "conversation-paused-exec",
+                self._args(),
+                {"nudges": {}, "last_resume": {}, "new_conversations": set()},
+            )
+
+            self.assertEqual(outcome, "nudged")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][2], "conversation-paused-exec")
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.latest_activity_ts = original_activity
+            MODULE.send_nudge = original_nudge
+
     def test_sandbox_missing_does_not_nudge(self):
         original_get = MODULE.get_conversation
         original_events = MODULE.fetch_recent_events
