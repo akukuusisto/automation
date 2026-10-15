@@ -826,6 +826,12 @@ def pause_duplicate_conversations(
         conversation_id = (candidate.get("id") or "").strip()
         if not conversation_id or conversation_id == canonical_id:
             continue
+        # Discovery may contain many historical sessions; only refresh candidates
+        # that were reported as actively running to keep normal runs inexpensive.
+        if candidate.get("sandbox_status") != "RUNNING" or str(
+            candidate.get("execution_status") or ""
+        ).casefold() != "running":
+            continue
         try:
             current = get_conversation(base_url, headers, conversation_id)
         except ConversationNotFound:
