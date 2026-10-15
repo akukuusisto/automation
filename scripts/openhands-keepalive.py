@@ -425,7 +425,7 @@ def resolve_skip_title_prefixes():
     result = []
     seen = set()
     for value in values:
-        prefix = re.sub(r"^[^\\w]+", "", (value or "").strip(), flags=re.UNICODE).casefold()
+        prefix = re.sub(r"^[^\w]+", "", (value or "").strip(), flags=re.UNICODE).casefold()
         if prefix and prefix not in seen:
             seen.add(prefix)
             result.append(prefix)
@@ -439,7 +439,7 @@ def is_ignored_probe_conversation(item, prefixes=None):
     title = item.get("title")
     if not isinstance(title, str):
         return False
-    normalized_title = re.sub(r"^[^\\w]+", "", title.strip(), flags=re.UNICODE).casefold()
+    normalized_title = re.sub(r"^[^\w]+", "", title.strip(), flags=re.UNICODE).casefold()
     for prefix in prefixes or resolve_skip_title_prefixes():
         prefix = (prefix or "").strip().casefold()
         if not prefix or not normalized_title.startswith(prefix):
