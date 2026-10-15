@@ -64,7 +64,6 @@ AT_RISK_OUTCOMES = {
     "replacement-start-skipped",
     "starting-stuck",
     "not-running",
-    "duplicate-pause-failed",
 }
 TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
 # 404/410 send-messagesta tarkoittaa ett\u00e4 conversation on arkistoitu tai
@@ -793,121 +792,6 @@ def try_resume(base_url, headers, sandbox_id, dry_run):
 
 
 
-def try_pause(base_url, headers, sandbox_id, dry_run):
-    """Pause a duplicate sandbox to stop a second agent consuming resources."""
-    if not sandbox_id:
-        print("  duplicate pause: sandbox_id puuttuu")
-        return False
-    if dry_run:
-        print("  DRY-RUN: duplicate sandbox would be paused")
-        return True
-    try:
-        response = requests.post(
-            f"{base_url}/api/v1/sandboxes/{sandbox_id}/pause",
-            headers=headers,
-            timeout=30,
-        )
-        if response.status_code < 300:
-            print("  duplicate sandbox pause OK")
-            return True
-        print(f"  duplicate sandbox pause -> HTTP {response.status_code}")
-    except Exception as exc:
-        print(f"  duplicate sandbox pause failed: {safe_error_label(exc)}")
-    return False
-
-
-def pause_probe_conversations(base_url, headers, items, dry_run=False):
-    """Stop active disposable probe sessions before excluding them from normal management."""
-    failed = False
-    for candidate in items:
-        if not is_ignored_probe_conversation(candidate):
-            continue
-        conversation_id = (candidate.get("id") or "").strip()
-        if not conversation_id:
-            continue
-        # Avoid API requests for historical probes that discovery already shows
-        # as inactive. Only refresh a session that appears to be consuming resources.
-        if candidate.get("sandbox_status") != "RUNNING" or str(
-            candidate.get("execution_status") or ""
-        ).casefold() != "running":
-            continue
-        try:
-            current = get_conversation(base_url, headers, conversation_id)
-        except ConversationNotFound:
-            continue
-        except Exception as exc:
-            print(
-                "  active probe status check failed: "
-                f"{safe_error_label(exc)} ({label_conversation(conversation_id)})"
-            )
-            failed = True
-            continue
-
-        if current.get("sandbox_status") != "RUNNING" or str(
-            current.get("execution_status") or ""
-        ).casefold() != "running":
-            continue
-
-        print(
-            "  active disposable probe -> pause "
-            f"{label_conversation(conversation_id)}"
-        )
-        if not try_pause(
-            base_url, headers, current.get("sandbox_id") or "", dry_run
-        ):
-            failed = True
-
-    if failed:
-        # Fail closed: don't report a healthy run while a disposable paid session
-        # may still be consuming resources.
-        raise RuntimeError("Unable to verify or pause one or more active probe sessions")
-
-
-def pause_duplicate_conversations(
-    base_url, headers, repository, candidates, canonical, dry_run=False
-):
-    """Pause every older non-canonical conversation that is still actively running."""
-    canonical_id = (canonical.get("id") or "").strip()
-    failed = False
-    for candidate in candidates:
-        conversation_id = (candidate.get("id") or "").strip()
-        if not conversation_id or conversation_id == canonical_id:
-            continue
-        # Discovery may contain many historical sessions; only refresh candidates
-        # that were reported as actively running to keep normal runs inexpensive.
-        if candidate.get("sandbox_status") != "RUNNING" or str(
-            candidate.get("execution_status") or ""
-        ).casefold() != "running":
-            continue
-        try:
-            current = get_conversation(base_url, headers, conversation_id)
-        except ConversationNotFound:
-            continue
-        except Exception as exc:
-            print(
-                f"  duplicate status check failed: {safe_error_label(exc)} "
-                f"({label_conversation(conversation_id)})"
-            )
-            failed = True
-            continue
-
-        if current.get("sandbox_status") != "RUNNING" or str(
-            current.get("execution_status") or ""
-        ).casefold() != "running":
-            continue
-
-        print(
-            f"  duplicate active conversation -> pause "
-            f"{label_conversation(conversation_id)} "
-            f"repo={label_repository(repository)}"
-        )
-        if not try_pause(
-            base_url, headers, current.get("sandbox_id") or "", dry_run
-        ):
-            failed = True
-    return not failed
-
-
 def wait_for_resumed_sandbox(base_url, headers, conversation_id, sandbox_id, timeout=90, interval=5):
     """Wait for a resumed sandbox to become RUNNING before using the conversation.
 
@@ -1488,10 +1372,6 @@ def collect_conversation_groups(
                 f"{label_conversation(cid)}: {safe_error_label(exc)}"
             )
 
-    # Probe sessions are excluded from canonical selection, but first stop any
-    # probe whose discovery state says it is actively consuming a sandbox.
-    pause_probe_conversations(base_url, headers, items, dry_run=args.dry_run)
-
     return group_conversations_by_repository(
         items,
         skip_ids=skip_ids,
@@ -1624,14 +1504,6 @@ def main():
 
     register_repository_labels(latest)
 
-    duplicate_pause_failures = set()
-    for repository, candidates in sorted(groups.items()):
-        canonical = latest.get(repository)
-        if canonical and not pause_duplicate_conversations(
-            base_url, headers, repository, candidates, canonical, args.dry_run
-        ):
-            duplicate_pause_failures.add(repository)
-
     print("--- OpenHands keepalive ---")
     print(f"nudge-mode: {args.nudge_mode}")
     print(f"discover: {bool(args.discover)}")
@@ -1675,8 +1547,6 @@ def main():
             # ett\u00e4 agentti ei vastannut nudgeihin ja conversation korvattiin.
             outcome = f"{outcome}->{fallback_outcome}"
 
-        if repository in duplicate_pause_failures:
-            outcome = f"{outcome}->duplicate-pause-failed"
         results.append((repository, cid, outcome))
         print()
 
