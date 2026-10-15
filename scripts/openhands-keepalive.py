@@ -816,6 +816,53 @@ def try_pause(base_url, headers, sandbox_id, dry_run):
     return False
 
 
+def pause_probe_conversations(base_url, headers, items, dry_run=False):
+    """Stop active disposable probe sessions before excluding them from normal management."""
+    failed = False
+    for candidate in items:
+        if not is_ignored_probe_conversation(candidate):
+            continue
+        conversation_id = (candidate.get("id") or "").strip()
+        if not conversation_id:
+            continue
+        # Avoid API requests for historical probes that discovery already shows
+        # as inactive. Only refresh a session that appears to be consuming resources.
+        if candidate.get("sandbox_status") != "RUNNING" or str(
+            candidate.get("execution_status") or ""
+        ).casefold() != "running":
+            continue
+        try:
+            current = get_conversation(base_url, headers, conversation_id)
+        except ConversationNotFound:
+            continue
+        except Exception as exc:
+            print(
+                "  active probe status check failed: "
+                f"{safe_error_label(exc)} ({label_conversation(conversation_id)})"
+            )
+            failed = True
+            continue
+
+        if current.get("sandbox_status") != "RUNNING" or str(
+            current.get("execution_status") or ""
+        ).casefold() != "running":
+            continue
+
+        print(
+            "  active disposable probe -> pause "
+            f"{label_conversation(conversation_id)}"
+        )
+        if not try_pause(
+            base_url, headers, current.get("sandbox_id") or "", dry_run
+        ):
+            failed = True
+
+    if failed:
+        # Fail closed: don't report a healthy run while a disposable paid session
+        # may still be consuming resources.
+        raise RuntimeError("Unable to verify or pause one or more active probe sessions")
+
+
 def pause_duplicate_conversations(
     base_url, headers, repository, candidates, canonical, dry_run=False
 ):
@@ -1440,6 +1487,10 @@ def collect_conversation_groups(
                 f"  seed conversation -haku ep\u00e4onnistui "
                 f"{label_conversation(cid)}: {safe_error_label(exc)}"
             )
+
+    # Probe sessions are excluded from canonical selection, but first stop any
+    # probe whose discovery state says it is actively consuming a sandbox.
+    pause_probe_conversations(base_url, headers, items, dry_run=args.dry_run)
 
     return group_conversations_by_repository(
         items,
