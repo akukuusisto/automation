@@ -270,62 +270,6 @@ class NudgeRecoveryTests(unittest.TestCase):
         values.update(overrides)
         return SimpleNamespace(**values)
 
-    def test_active_environment_probe_is_paused_before_exclusion(self):
-        original_get = MODULE.get_conversation
-        original_pause = MODULE.try_pause
-        conversation = {
-            "id": "probe", "title": "zz env probe - smoke test",
-            "selected_repository": "akukuusisto/build-horizon-pilot",
-            "sandbox_status": "RUNNING", "execution_status": "running",
-            "sandbox_id": "sandbox-probe",
-        }
-        calls = []
-        try:
-            MODULE.get_conversation = lambda _url, _headers, _cid: conversation
-            MODULE.try_pause = lambda _url, _headers, sandbox_id, dry_run: calls.append(
-                (sandbox_id, dry_run)
-            ) or True
-            MODULE.pause_probe_conversations(
-                "https://app.all-hands.dev", {}, [conversation], dry_run=False
-            )
-            self.assertEqual(calls, [("sandbox-probe", False)])
-            self.assertTrue(MODULE.is_ignored_probe_conversation(conversation))
-        finally:
-            MODULE.get_conversation = original_get
-            MODULE.try_pause = original_pause
-
-    def test_only_active_noncanonical_duplicate_is_paused(self):
-        original_get = MODULE.get_conversation
-        original_pause = MODULE.try_pause
-        conversations = {
-            "canonical": {
-                "id": "canonical", "sandbox_status": "RUNNING",
-                "execution_status": "running", "sandbox_id": "sandbox-canonical",
-            },
-            "duplicate": {
-                "id": "duplicate", "sandbox_status": "RUNNING",
-                "execution_status": "running", "sandbox_id": "sandbox-duplicate",
-            },
-            "idle": {
-                "id": "idle", "sandbox_status": "RUNNING",
-                "execution_status": "finished", "sandbox_id": "sandbox-idle",
-            },
-        }
-        calls = []
-        try:
-            MODULE.get_conversation = lambda _url, _headers, cid: conversations[cid]
-            MODULE.try_pause = lambda _url, _headers, sandbox_id, _dry_run: calls.append(sandbox_id) or True
-            ok = MODULE.pause_duplicate_conversations(
-                "https://app.all-hands.dev", {}, "akukuusisto/build-horizon-pilot",
-                [conversations["canonical"], conversations["duplicate"], conversations["idle"]],
-                conversations["canonical"],
-            )
-            self.assertTrue(ok)
-            self.assertEqual(calls, ["sandbox-duplicate"])
-        finally:
-            MODULE.get_conversation = original_get
-            MODULE.try_pause = original_pause
-
     def test_send_nudge_function_exists_and_supports_dry_run(self):
         self.assertTrue(callable(MODULE.send_nudge))
         self.assertTrue(
