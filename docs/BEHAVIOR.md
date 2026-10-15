@@ -3,12 +3,10 @@
 This workflow keeps exactly **one canonical conversation per repository** alive.
 
 Disposable environment-probe sessions (including titles beginning with `zz env probe`)
-are never managed as agents. If a probe is already actively running, the workflow
-attempts to pause its sandbox before excluding it; failure to stop an active probe
-fails the run visibly rather than reporting success. If multiple sessions for one
-repository are still actively running, the newest usable one remains canonical and
-older active sandboxes are paused; failures to pause are reported as an at-risk result.
-Repository names are grouped case-insensitively.
+are excluded from agent selection and are neither nudged nor stopped. The newest
+usable conversation remains the canonical conversation for each repository; older
+duplicates are left alone and may finish naturally. Repository names are grouped
+case-insensitively.
 
 > Tämä repositorio on julkinen, joten Actions-logit ja step summaryt ovat julkisia.
 > Tässä dokumentissa ei ole conversation-UUID:ita, salaisuuksia eikä yksityisten
@@ -24,8 +22,8 @@ Repository names are grouped case-insensitively.
    secret (case-insensitive, comma-separated), including all its conversations.
    Excluded repositories are not nudged, recovered, or replaced.
 4. Group by normalized, case-insensitive `selected_repository`.
-5. Keep one canonical conversation per repository and pause any older, non-canonical
-   conversation whose sandbox and execution are both actively running.
+5. Keep one canonical conversation per repository for keepalive operations. Older
+   duplicate conversations are not nudged or stopped and can finish naturally.
 6. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
    or `STARTING`).
 7. A conversation with sandbox `ERROR` is not considered usable when another
