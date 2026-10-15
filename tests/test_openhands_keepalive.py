@@ -171,6 +171,46 @@ class RepositorySelectionTests(unittest.TestCase):
         self.assertEqual(latest["akukuusisto/tradefoundry"]["id"], "new")
         self.assertEqual(latest["akukuusisto/accounter"]["id"], "other")
 
+    def test_probe_conversations_are_excluded_from_repository_groups(self):
+        groups = MODULE.group_conversations_by_repository([
+            {
+                "id": "probe",
+                "selected_repository": "akukuusisto/build-horizon-pilot",
+                "title": "zz env probe - smoke test",
+                "created_at": "2026-10-15T08:00:00Z",
+                "sandbox_status": "RUNNING",
+                "execution_status": "running",
+            },
+            {
+                "id": "real-agent",
+                "selected_repository": "akukuusisto/build-horizon-pilot",
+                "title": "build-horizon-pilot: keepalive",
+                "created_at": "2026-10-14T08:00:00Z",
+                "sandbox_status": "RUNNING",
+                "execution_status": "running",
+            },
+        ])
+        self.assertEqual(list(groups), ["akukuusisto/build-horizon-pilot"])
+        self.assertEqual([item["id"] for item in groups["akukuusisto/build-horizon-pilot"]], ["real-agent"])
+
+    def test_repository_name_casing_does_not_create_separate_groups(self):
+        groups = MODULE.group_conversations_by_repository([
+            {
+                "id": "older",
+                "selected_repository": "Akukuusisto/Build-Horizon-Pilot",
+                "created_at": "2026-10-14T08:00:00Z",
+                "sandbox_status": "RUNNING",
+            },
+            {
+                "id": "newer",
+                "selected_repository": "akukuusisto/build-horizon-pilot",
+                "created_at": "2026-10-15T08:00:00Z",
+                "sandbox_status": "RUNNING",
+            },
+        ])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups["akukuusisto/build-horizon-pilot"][0]["id"], "newer")
+
     def test_newest_error_prefers_older_usable_conversation(self):
         groups = MODULE.group_conversations_by_repository([
             {"id": "older-running", "selected_repository": "org/example",
@@ -229,6 +269,38 @@ class NudgeRecoveryTests(unittest.TestCase):
         )
         values.update(overrides)
         return SimpleNamespace(**values)
+
+    def test_only_active_noncanonical_duplicate_is_paused(self):
+        original_get = MODULE.get_conversation
+        original_pause = MODULE.try_pause
+        conversations = {
+            "canonical": {
+                "id": "canonical", "sandbox_status": "RUNNING",
+                "execution_status": "running", "sandbox_id": "sandbox-canonical",
+            },
+            "duplicate": {
+                "id": "duplicate", "sandbox_status": "RUNNING",
+                "execution_status": "running", "sandbox_id": "sandbox-duplicate",
+            },
+            "idle": {
+                "id": "idle", "sandbox_status": "RUNNING",
+                "execution_status": "finished", "sandbox_id": "sandbox-idle",
+            },
+        }
+        calls = []
+        try:
+            MODULE.get_conversation = lambda _url, _headers, cid: conversations[cid]
+            MODULE.try_pause = lambda _url, _headers, sandbox_id, _dry_run: calls.append(sandbox_id) or True
+            ok = MODULE.pause_duplicate_conversations(
+                "https://app.all-hands.dev", {}, "akukuusisto/build-horizon-pilot",
+                [conversations["canonical"], conversations["duplicate"], conversations["idle"]],
+                conversations["canonical"],
+            )
+            self.assertTrue(ok)
+            self.assertEqual(calls, ["sandbox-duplicate"])
+        finally:
+            MODULE.get_conversation = original_get
+            MODULE.try_pause = original_pause
 
     def test_send_nudge_function_exists_and_supports_dry_run(self):
         self.assertTrue(callable(MODULE.send_nudge))

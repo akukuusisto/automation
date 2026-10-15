@@ -2,6 +2,12 @@
 
 This workflow keeps exactly **one canonical conversation per repository** alive.
 
+Disposable environment-probe sessions (including titles beginning with `zz env probe`)
+are excluded from management. If multiple sessions for one repository are still
+actively running, the newest usable one remains canonical and older active
+sandboxes are paused; failures to pause are reported as an at-risk result.
+Repository names are grouped case-insensitively.
+
 > Tämä repositorio on julkinen, joten Actions-logit ja step summaryt ovat julkisia.
 > Tässä dokumentissa ei ole conversation-UUID:ita, salaisuuksia eikä yksityisten
 > repositorioiden nimiä. Skripti peittää ne myös lokituksesta oletuksena.
@@ -9,23 +15,28 @@ This workflow keeps exactly **one canonical conversation per repository** alive.
 ## Selection rules
 
 1. Discover available conversations (or use seed IDs from secrets).
-2. Exclude every repository listed in the optional `OPENHANDS_SKIP_REPOSITORIES`
+2. Exclude disposable environment-probe titles (built-in `zz env probe`, `zz env test`,
+   and related prefixes). Add more comma-separated prefixes with the optional
+   `OPENHANDS_SKIP_TITLE_PREFIXES` Actions variable.
+3. Exclude every repository listed in the optional `OPENHANDS_SKIP_REPOSITORIES`
    secret (case-insensitive, comma-separated), including all its conversations.
    Excluded repositories are not nudged, recovered, or replaced.
-3. Group by `selected_repository`.
-4. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
+4. Group by normalized, case-insensitive `selected_repository`.
+5. Keep one canonical conversation per repository and pause any older, non-canonical
+   conversation whose sandbox and execution are both actively running.
+6. Prefer the newest conversation whose sandbox is usable (`RUNNING`, `PAUSED`,
    or `STARTING`).
-5. A conversation with sandbox `ERROR` is not considered usable when another
+7. A conversation with sandbox `ERROR` is not considered usable when another
    candidate has a non-error, non-missing sandbox. This keeps a broken newest
    conversation from masking an older working one.
-6. If no usable candidate exists, try the newest non-missing conversation so the
+8. If no usable candidate exists, try the newest non-missing conversation so the
    recovery path can attempt to repair it; only use a `MISSING` candidate when
    every candidate is missing.
-7. Loss recovery runs when the selected conversation is missing, not found,
+9. Loss recovery runs when the selected conversation is missing, not found,
    stalled, or unable to accept a nudge. Reuse an older conversation where possible,
    or start a replacement when no reusable conversation exists and no recent
    start-task is active.
-8. A conversation that is resumed or replaced automatically becomes canonical on
+10. A conversation that is resumed or replaced automatically becomes canonical on
    the next run when its sandbox is usable.
 
 ## Nudge rules

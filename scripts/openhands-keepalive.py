@@ -64,6 +64,7 @@ AT_RISK_OUTCOMES = {
     "replacement-start-skipped",
     "starting-stuck",
     "not-running",
+    "duplicate-pause-failed",
 }
 TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
 # 404/410 send-messagesta tarkoittaa ett\u00e4 conversation on arkistoitu tai
@@ -139,6 +140,15 @@ def label_title(title) -> str:
 TITLE_SEPARATOR = ": "
 DEFAULT_TITLE_SUFFIX = "keepalive"
 LEGACY_STOP_TOKENS = ("LOOP-STOP", "DONE")
+
+# Disposable environment/API probes must never become managed agents.
+# Custom prefixes can be added with OPENHANDS_SKIP_TITLE_PREFIXES (comma-separated).
+DEFAULT_SKIP_TITLE_PREFIXES = (
+    "zz env probe",
+    "zz environment probe",
+    "zz env test",
+    "zz probe",
+)
 
 
 def repository_short_name(repository: str) -> str:
@@ -408,6 +418,38 @@ def resolve_skip_repositories():
     }
 
 
+def resolve_skip_title_prefixes():
+    """Return built-in probe prefixes plus optional configured title prefixes."""
+    values = list(DEFAULT_SKIP_TITLE_PREFIXES)
+    values.extend(os.getenv("OPENHANDS_SKIP_TITLE_PREFIXES", "").split(","))
+    result = []
+    seen = set()
+    for value in values:
+        prefix = re.sub(r"^[^\\w]+", "", (value or "").strip(), flags=re.UNICODE).casefold()
+        if prefix and prefix not in seen:
+            seen.add(prefix)
+            result.append(prefix)
+    return tuple(result)
+
+
+def is_ignored_probe_conversation(item, prefixes=None):
+    """Identify named disposable environment probes without matching ordinary work."""
+    if not isinstance(item, dict):
+        return False
+    title = item.get("title")
+    if not isinstance(title, str):
+        return False
+    normalized_title = re.sub(r"^[^\\w]+", "", title.strip(), flags=re.UNICODE).casefold()
+    for prefix in prefixes or resolve_skip_title_prefixes():
+        prefix = (prefix or "").strip().casefold()
+        if not prefix or not normalized_title.startswith(prefix):
+            continue
+        remainder = normalized_title[len(prefix):]
+        if not remainder or remainder[0].isspace() or remainder[0] in ":-—(":
+            return True
+    return False
+
+
 def parse_updated_at(value: str) -> float:
     if not value:
         return 0.0
@@ -506,7 +548,8 @@ def _repository_from_conversation(conversation):
 
 
 def group_conversations_by_repository(
-    items, skip_ids=None, skip_repositories=None, excluded_repositories=None
+    items, skip_ids=None, skip_repositories=None, excluded_repositories=None,
+    skip_title_prefixes=None,
 ):
     groups = {}
     skip_ids = skip_ids or set()
@@ -526,12 +569,15 @@ def group_conversations_by_repository(
         normalized_repository = normalize_repository_name(repository)
         if not cid or not repository:
             continue
+        if is_ignored_probe_conversation(item, skip_title_prefixes):
+            print("  probe/test conversation excluded by title prefix")
+            continue
         if normalized_repository in skip_repositories:
             excluded_repositories.add(normalized_repository)
             continue
         if cid in skip_ids:
             continue
-        groups.setdefault(repository, []).append(item)
+        groups.setdefault(normalized_repository, []).append(item)
 
     for repository, candidates in groups.items():
         candidates.sort(
@@ -745,6 +791,68 @@ def try_resume(base_url, headers, sandbox_id, dry_run):
         print(f"  resume ep\u00e4onnistui: {safe_error_label(exc)}")
         return False
 
+
+
+def try_pause(base_url, headers, sandbox_id, dry_run):
+    """Pause a duplicate sandbox to stop a second agent consuming resources."""
+    if not sandbox_id:
+        print("  duplicate pause: sandbox_id puuttuu")
+        return False
+    if dry_run:
+        print("  DRY-RUN: duplicate sandbox would be paused")
+        return True
+    try:
+        response = requests.post(
+            f"{base_url}/api/v1/sandboxes/{sandbox_id}/pause",
+            headers=headers,
+            timeout=30,
+        )
+        if response.status_code < 300:
+            print("  duplicate sandbox pause OK")
+            return True
+        print(f"  duplicate sandbox pause -> HTTP {response.status_code}")
+    except Exception as exc:
+        print(f"  duplicate sandbox pause failed: {safe_error_label(exc)}")
+    return False
+
+
+def pause_duplicate_conversations(
+    base_url, headers, repository, candidates, canonical, dry_run=False
+):
+    """Pause every older non-canonical conversation that is still actively running."""
+    canonical_id = (canonical.get("id") or "").strip()
+    failed = False
+    for candidate in candidates:
+        conversation_id = (candidate.get("id") or "").strip()
+        if not conversation_id or conversation_id == canonical_id:
+            continue
+        try:
+            current = get_conversation(base_url, headers, conversation_id)
+        except ConversationNotFound:
+            continue
+        except Exception as exc:
+            print(
+                f"  duplicate status check failed: {safe_error_label(exc)} "
+                f"({label_conversation(conversation_id)})"
+            )
+            failed = True
+            continue
+
+        if current.get("sandbox_status") != "RUNNING" or str(
+            current.get("execution_status") or ""
+        ).casefold() != "running":
+            continue
+
+        print(
+            f"  duplicate active conversation -> pause "
+            f"{label_conversation(conversation_id)} "
+            f"repo={label_repository(repository)}"
+        )
+        if not try_pause(
+            base_url, headers, current.get("sandbox_id") or "", dry_run
+        ):
+            failed = True
+    return not failed
 
 
 def wait_for_resumed_sandbox(base_url, headers, conversation_id, sandbox_id, timeout=90, interval=5):
@@ -1028,7 +1136,8 @@ def has_recent_start_task(
             status = str(task.get("status", "")).upper()
             if (
                 status in active_statuses
-                and _repository_from_start_task(task) == repository
+                and normalize_repository_name(_repository_from_start_task(task))
+                == normalize_repository_name(repository)
             ):
                 print(
                     f"  start-task: aktiivinen/recent l\u00f6ytyy jo: "
@@ -1458,6 +1567,14 @@ def main():
 
     register_repository_labels(latest)
 
+    duplicate_pause_failures = set()
+    for repository, candidates in sorted(groups.items()):
+        canonical = latest.get(repository)
+        if canonical and not pause_duplicate_conversations(
+            base_url, headers, repository, candidates, canonical, args.dry_run
+        ):
+            duplicate_pause_failures.add(repository)
+
     print("--- OpenHands keepalive ---")
     print(f"nudge-mode: {args.nudge_mode}")
     print(f"discover: {bool(args.discover)}")
@@ -1501,6 +1618,8 @@ def main():
             # ett\u00e4 agentti ei vastannut nudgeihin ja conversation korvattiin.
             outcome = f"{outcome}->{fallback_outcome}"
 
+        if repository in duplicate_pause_failures:
+            outcome = f"{outcome}->duplicate-pause-failed"
         results.append((repository, cid, outcome))
         print()
 
