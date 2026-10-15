@@ -3,9 +3,11 @@
 This workflow keeps exactly **one canonical conversation per repository** alive.
 
 Disposable environment-probe sessions (including titles beginning with `zz env probe`)
-are excluded from management. If multiple sessions for one repository are still
-actively running, the newest usable one remains canonical and older active
-sandboxes are paused; failures to pause are reported as an at-risk result.
+are never managed as agents. If a probe is already actively running, the workflow
+attempts to pause its sandbox before excluding it; failure to stop an active probe
+fails the run visibly rather than reporting success. If multiple sessions for one
+repository are still actively running, the newest usable one remains canonical and
+older active sandboxes are paused; failures to pause are reported as an at-risk result.
 Repository names are grouped case-insensitively.
 
 > Tämä repositorio on julkinen, joten Actions-logit ja step summaryt ovat julkisia.
