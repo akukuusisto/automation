@@ -1128,8 +1128,8 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 # Resume päivittää conversation.updated_at-aikaleiman, joten
                 # hyvin pian rajan saavuttanut idle-aika voi nollautua seuraavaa
                 # keepalive-ajoa varten. Jos alkuperäisestä nudge-rajasta puuttuu
-                # enintään idle-timeoutin verran, lähetä nudge nyt eikä vasta
-                # uuden täyden odotusjakson jälkeen.
+                # enintään 60 sekuntia, lähetä nudge nyt eikä vasta uuden
+                # täyden odotusjakson jälkeen.
                 # Keep the minimum nudge interval meaningful: tolerate only
                 # small scheduling jitter, never half of the full interval.
                 resume_nudge_grace = min(60, nudge_after // 2)
