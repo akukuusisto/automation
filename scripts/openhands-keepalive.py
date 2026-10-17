@@ -328,7 +328,7 @@ def parse_args():
     parser.add_argument(
         "--run-budget",
         type=int,
-        default=int(os.getenv("OPENHANDS_RUN_BUDGET_SECONDS", "420")),
+        default=int(os.getenv("OPENHANDS_RUN_BUDGET_SECONDS", "780")),
         help="--once-ajon aikabudjetti sekunteina (0 = ei rajaa)",
     )
     parser.add_argument("--resume-wait-seconds", type=int, default=int(os.getenv("OPENHANDS_RESUME_WAIT_SECONDS", "90")))
@@ -1402,6 +1402,25 @@ def write_step_summary(results):
         print(f"  step summary ep\u00e4onnistui: {safe_error_label(exc)}")
 
 
+def fair_repository_order(repositories, run_number=None, now=None):
+    """Rotate the first repository by run so budget limits cannot starve a fixed tail.
+
+    GitHub Actions supplies a monotonically increasing run number for this
+    workflow. Outside Actions, use the current 15-minute bucket as a fallback.
+    Sorting first keeps each rotation deterministic and easy to test.
+    """
+    ordered = sorted(set(repositories or []))
+    if len(ordered) < 2:
+        return ordered
+    try:
+        seed = int(run_number)
+    except (TypeError, ValueError):
+        clock = time.time() if now is None else float(now)
+        seed = int(clock // 900)
+    offset = seed % len(ordered)
+    return ordered[offset:] + ordered[:offset]
+
+
 def main():
     global VERBOSE
     args = parse_args()
@@ -1478,7 +1497,16 @@ def main():
     print()
 
     results = []
-    for repository in sorted(groups):
+    repository_order = fair_repository_order(
+        groups, run_number=os.getenv("GITHUB_RUN_NUMBER")
+    )
+    if len(repository_order) > 1:
+        first_repo = repository_order[0]
+        print(
+            "repository priority rotates by run to prevent budget starvation "
+            f"(first: {label_repository(first_repo)})"
+        )
+    for repository in repository_order:
         if budget_exhausted():
             print(
                 f"  run budget ({args.run_budget}s) ylitetty -> "

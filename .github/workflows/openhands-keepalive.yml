@@ -80,7 +80,8 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 15 min allows the 13-minute script budget plus cleanup/summary margin.
+    timeout-minutes: 15
     # Päällekkäiset ajot jonottavat peräkkäin, eivät koskaan rinnakkain.
     # Concurrency on tässä jobissa (ei koko workflow'ssa), jotta PR-ajot eivät
     # jonota oikeita keepalive-ajoja.
@@ -109,8 +110,10 @@ jobs:
           # Neljän vastaamattoman nuden jälkeen conversation todetaan jumiin
           # jääneeksi ja se korvataan.
           OPENHANDS_MAX_STALLED_NUDGES: "4"
-          # Aikabudjetti: yhteenveto ehtii syntyä ennen jobin timeoutia.
-          OPENHANDS_RUN_BUDGET_SECONDS: "420"
+          # 13 min provides room for seven sequential sandbox resumes; the
+          # two-minute job margin lets the script write its summary before timeout.
+          # Repository priority rotates each run if a slow sandbox still exhausts it.
+          OPENHANDS_RUN_BUDGET_SECONDS: "780"
           # Aseta "true", jos haluat että ajo epäonnistuu kun jokin conversation
           # tarvitsee ihmisen (waiting_for_confirmation).
           OPENHANDS_FAIL_ON_ATTENTION: "false"
