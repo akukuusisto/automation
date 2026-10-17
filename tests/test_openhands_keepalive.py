@@ -1336,7 +1336,7 @@ class ResumeRecoveryTests(unittest.TestCase):
             "sandbox_id": "sandbox-1",
         }
 
-    def _run(self, args, statuses, resume=True):
+    def _run(self, args, statuses, resume=True, activity_offset=3600):
         original_get = MODULE.get_conversation
         original_activity = MODULE.latest_activity_ts
         original_resume = MODULE.try_resume
@@ -1347,8 +1347,9 @@ class ResumeRecoveryTests(unittest.TestCase):
             MODULE.get_conversation = lambda *a, **k: self._conversation(
                 next(statuses_iter)
             )
-            # raskas idle, jotta testi todistaa ettei nudgea laheteta
-            MODULE.latest_activity_ts = lambda *a: MODULE.time.time() - 3600
+            MODULE.latest_activity_ts = (
+                lambda *a: MODULE.time.time() - activity_offset
+            )
             MODULE.try_resume = lambda *a: resume
             calls = []
             MODULE.send_nudge = lambda *a: calls.append(a) or True
@@ -1374,6 +1375,26 @@ class ResumeRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(outcome, "resumed->nudged")
         self.assertEqual(len(calls), 1)
+
+    def test_resume_nudges_when_original_idle_is_near_threshold(self):
+        # Resume may reset updated_at. Preserve a nearly-expired idle window by
+        # nudging now when the original idle misses the threshold by <= grace.
+        outcome, calls = self._run(
+            self._args(),
+            ["PAUSED", "STARTING", "RUNNING"],
+            activity_offset=1779,
+        )
+        self.assertEqual(outcome, "resumed->nudged")
+        self.assertEqual(len(calls), 1)
+
+    def test_resume_still_waits_when_original_idle_is_far_below_threshold(self):
+        outcome, calls = self._run(
+            self._args(),
+            ["PAUSED", "STARTING", "RUNNING"],
+            activity_offset=100,
+        )
+        self.assertEqual(outcome, "resumed")
+        self.assertEqual(calls, [])
 
     def test_nudge_is_sent_only_after_the_sandbox_is_running(self):
         original_get = MODULE.get_conversation
