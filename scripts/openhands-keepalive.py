@@ -719,15 +719,18 @@ def fetch_recent_events(base_url, headers, conversation_id, limit=20):
 
 
 def latest_activity_ts(base_url, headers, conversation_id, updated_ts: float):
-    events = fetch_recent_events(base_url, headers, conversation_id, limit=10)
+    events = fetch_recent_events(base_url, headers, conversation_id, limit=20)
     if events is None:
         return updated_ts
-    best = updated_ts or 0.0
+    # updated_at can change when a sandbox resumes even if the conversation
+    # has not had new activity. Prefer timestamped history when available so
+    # that resuming does not restart the idle clock on the next keepalive run.
+    best = 0.0
     for event in events:
         ts = _event_timestamp(event)
         if ts > best:
             best = ts
-    return best
+    return best or updated_ts
 
 
 def try_resume(base_url, headers, sandbox_id, dry_run):
@@ -1120,33 +1123,17 @@ def check_conversation(base_url, headers, conv_id, args, state):
                         "odotetaan seuraavaa keepalive-kierrosta"
                     )
                     return "resuming"
-                # Sandbox on nyt vahvistettu RUNNING-tilaan, joten send-message
-                # ei enää palauta 409:ää ja nudge voidaan lähettää heti.
-                # Tämä on tarpeen siksi, että resume nollaa activity-aikaleiman:
-                # ilman tätä herätetty conversation näyttää "juuri aktiiviselta"
-                # ja odottaisi nudgea turhaan koko nudge-rajan (30 min) verran.
-                # Resume päivittää conversation.updated_at-aikaleiman, joten
-                # hyvin pian rajan saavuttanut idle-aika voi nollautua seuraavaa
-                # keepalive-ajoa varten. Jos alkuperäisestä nudge-rajasta puuttuu
-                # enintään 60 sekuntia, lähetä nudge nyt eikä vasta uuden
-                # täyden odotusjakson jälkeen.
-                # Keep the minimum nudge interval meaningful: tolerate only
-                # small scheduling jitter, never half of the full interval.
-                resume_nudge_grace = min(60, nudge_after // 2)
+                # Nudge is allowed only after the configured idle threshold.
+                # latest_activity_ts prefers event history over updated_at, so a
+                # resume timestamp won't restart the idle clock on the next run.
                 if idle_for is not None and idle_for < nudge_after:
-                    remaining_idle = nudge_after - idle_for
-                    if remaining_idle > resume_nudge_grace:
-                        print(
-                            f"  Resume valmis, idle {idle_for}s; nudge-rajaan "
-                            f"vielä {remaining_idle}s "
-                            f"(grace {resume_nudge_grace}s) -> seuraava kierros"
-                        )
-                        return "resumed"
-                    # Mark the threshold as satisfied so the common nudge path
-                    # below actually sends the message in this same pass.
-                    idle_for = nudge_after
+                    print(
+                        f"  Resume valmis, mutta idle {idle_for}s < "
+                        f"{nudge_after}s -> nudge jää seuraavalle kierrokselle"
+                    )
+                    return "resumed"
                 print(
-                    "  Resume valmis; idle riittävän lähellä nudge-rajaa -> "
+                    "  Resume valmis ja idle-raja ylitetty -> "
                     "nudge samalla kierroksella"
                 )
                 resume_prefix = "resumed->"
