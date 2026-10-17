@@ -1130,7 +1130,9 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 # keepalive-ajoa varten. Jos alkuperäisestä nudge-rajasta puuttuu
                 # enintään idle-timeoutin verran, lähetä nudge nyt eikä vasta
                 # uuden täyden odotusjakson jälkeen.
-                resume_nudge_grace = min(args.idle_timeout, nudge_after // 2)
+                # Keep the minimum nudge interval meaningful: tolerate only
+                # small scheduling jitter, never half of the full interval.
+                resume_nudge_grace = min(60, nudge_after // 2)
                 if idle_for is not None and idle_for < nudge_after:
                     remaining_idle = nudge_after - idle_for
                     if remaining_idle > resume_nudge_grace:
