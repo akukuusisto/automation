@@ -1125,14 +1125,28 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 # Tämä on tarpeen siksi, että resume nollaa activity-aikaleiman:
                 # ilman tätä herätetty conversation näyttää "juuri aktiiviselta"
                 # ja odottaisi nudgea turhaan koko nudge-rajan (30 min) verran.
+                # Resume päivittää conversation.updated_at-aikaleiman, joten
+                # hyvin pian rajan saavuttanut idle-aika voi nollautua seuraavaa
+                # keepalive-ajoa varten. Jos alkuperäisestä nudge-rajasta puuttuu
+                # enintään 60 sekuntia, lähetä nudge nyt eikä vasta uuden
+                # täyden odotusjakson jälkeen.
+                # Keep the minimum nudge interval meaningful: tolerate only
+                # small scheduling jitter, never half of the full interval.
+                resume_nudge_grace = min(60, nudge_after // 2)
                 if idle_for is not None and idle_for < nudge_after:
-                    print(
-                        f"  Resume valmis, mutta idle {idle_for}s < "
-                        f"{nudge_after}s -> nudge jää seuraavalle kierrokselle"
-                    )
-                    return "resumed"
+                    remaining_idle = nudge_after - idle_for
+                    if remaining_idle > resume_nudge_grace:
+                        print(
+                            f"  Resume valmis, idle {idle_for}s; nudge-rajaan "
+                            f"vielä {remaining_idle}s "
+                            f"(grace {resume_nudge_grace}s) -> seuraava kierros"
+                        )
+                        return "resumed"
+                    # Mark the threshold as satisfied so the common nudge path
+                    # below actually sends the message in this same pass.
+                    idle_for = nudge_after
                 print(
-                    "  Resume valmis ja idle-raja ylitetty -> "
+                    "  Resume valmis; idle riittävän lähellä nudge-rajaa -> "
                     "nudge samalla kierroksella"
                 )
                 resume_prefix = "resumed->"
