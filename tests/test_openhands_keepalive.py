@@ -134,7 +134,7 @@ class RepositorySelectionTests(unittest.TestCase):
             run_budget=0,
             base_url="https://app.all-hands.dev",
             idle_timeout=900,
-            min_nudge_interval=1800,
+            min_nudge_interval=900,
             max_stalled_nudges=4,
             verbose=False,
         )
@@ -221,7 +221,7 @@ class NudgeRecoveryTests(unittest.TestCase):
             resume_wait_seconds=90,
             resume_poll_interval=5,
             idle_timeout=900,
-            min_nudge_interval=1800,
+            min_nudge_interval=900,
             max_stalled_nudges=4,
             run_budget=420,
             fail_on_attention=False,
@@ -448,7 +448,7 @@ def keepalive_args(**overrides):
         resume_wait_seconds=90,
         resume_poll_interval=5,
         idle_timeout=900,
-        min_nudge_interval=1800,
+        min_nudge_interval=900,
         max_stalled_nudges=4,
         run_budget=420,
         fail_on_attention=False,
@@ -1353,7 +1353,7 @@ class ResumeRecoveryTests(unittest.TestCase):
             resume_wait_seconds=90,
             resume_poll_interval=1,
             idle_timeout=900,
-            min_nudge_interval=1800,
+            min_nudge_interval=900,
             max_stalled_nudges=4,
             run_budget=420,
             fail_on_attention=False,
@@ -1413,23 +1413,32 @@ class ResumeRecoveryTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_resume_below_threshold_waits_without_early_nudge(self):
-        # Keep the 1800s minimum interval strict; event history keeps the idle
-        # clock intact so the next pass can nudge when the threshold is reached.
+        # Preserve the 900s idle threshold using event history after resume.
         outcome, calls = self._run(
             self._args(),
             ["PAUSED", "STARTING", "RUNNING"],
-            activity_offset=1779,
+            activity_offset=899,
         )
         self.assertEqual(outcome, "resumed")
         self.assertEqual(calls, [])
 
-    def test_resume_does_not_bypass_minimum_nudge_interval(self):
-        # Even though resume resets updated_at, 1000s idle is too early for
-        # the configured 1800s minimum interval; the grace only covers jitter.
+    def test_resume_nudges_after_fifteen_minutes_idle(self):
+        # A resumed agent that has been idle longer than 900s should be nudged
+        # in the same pass, not left running until a later scheduled run.
         outcome, calls = self._run(
             self._args(),
             ["PAUSED", "STARTING", "RUNNING"],
-            activity_offset=1000,
+            activity_offset=901,
+        )
+        self.assertEqual(outcome, "resumed->nudged")
+        self.assertEqual(len(calls), 1)
+
+    def test_resume_does_not_bypass_minimum_nudge_interval(self):
+        # Resume must not bypass the configured 900s idle threshold.
+        outcome, calls = self._run(
+            self._args(),
+            ["PAUSED", "STARTING", "RUNNING"],
+            activity_offset=800,
         )
         self.assertEqual(outcome, "resumed")
         self.assertEqual(calls, [])
