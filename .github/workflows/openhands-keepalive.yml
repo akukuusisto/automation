@@ -103,9 +103,9 @@ jobs:
           OPENHANDS_NUDGE_MODE: "loop"
           OPENHANDS_IDLE_TIMEOUT: "900"
           OPENHANDS_RESUME_COOLDOWN: "900"
-          # Nudgea ei lähetetä samalle conversationille tätä tiheämmin. Tämä
-          # estää sen, että jumissa oleva conversation saisi nuden joka ajolla.
-          OPENHANDS_MIN_NUDGE_INTERVAL: "1800"
+          # Idle-raja vastaa 15 minuutin ajastusväliä, jotta pysähtynyt agentti
+          # saa uuden ohjeen viimeistään seuraavalla keepalive-kierroksella.
+          OPENHANDS_MIN_NUDGE_INTERVAL: "900"
           # Neljän vastaamattoman nuden jälkeen conversation todetaan jumiin
           # jääneeksi ja se korvataan.
           OPENHANDS_MAX_STALLED_NUDGES: "4"
