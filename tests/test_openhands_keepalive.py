@@ -1303,6 +1303,42 @@ class TitleSyncTests(unittest.TestCase):
         self.assertEqual(fake.payloads, [{"title": "toolbox: loop"}])
 
 
+class LatestActivityTimestampTests(unittest.TestCase):
+    def setUp(self):
+        self.original_fetch = MODULE.fetch_recent_events
+
+    def tearDown(self):
+        MODULE.fetch_recent_events = self.original_fetch
+
+    def test_event_history_wins_over_newer_updated_at_after_resume(self):
+        events = [
+            user_event(timestamp="2026-10-17T06:30:00Z"),
+            agent_event(timestamp="2026-10-17T06:40:00Z"),
+        ]
+        MODULE.fetch_recent_events = lambda *a, **k: events
+        updated_ts = MODULE.parse_updated_at("2026-10-17T07:00:00Z")
+
+        actual = MODULE.latest_activity_ts("https://app.all-hands.dev", {}, "conversation-1", updated_ts)
+
+        self.assertEqual(actual, MODULE.parse_updated_at("2026-10-17T06:40:00Z"))
+
+    def test_updated_at_is_fallback_when_event_history_has_no_timestamps(self):
+        MODULE.fetch_recent_events = lambda *a, **k: [{"source": "agent", "llm_message": {"content": "hello"}}]
+        updated_ts = MODULE.parse_updated_at("2026-10-17T07:00:00Z")
+
+        actual = MODULE.latest_activity_ts("https://app.all-hands.dev", {}, "conversation-1", updated_ts)
+
+        self.assertEqual(actual, updated_ts)
+
+    def test_updated_at_is_fallback_when_event_lookup_fails(self):
+        MODULE.fetch_recent_events = lambda *a, **k: None
+        updated_ts = MODULE.parse_updated_at("2026-10-17T07:00:00Z")
+
+        actual = MODULE.latest_activity_ts("https://app.all-hands.dev", {}, "conversation-1", updated_ts)
+
+        self.assertEqual(actual, updated_ts)
+
+
 class ResumeRecoveryTests(unittest.TestCase):
     """Resume on asynkroninen: nudgea ei laheteta ennen kuin sandbox on RUNNING."""
 
@@ -1376,16 +1412,16 @@ class ResumeRecoveryTests(unittest.TestCase):
         self.assertEqual(outcome, "resumed->nudged")
         self.assertEqual(len(calls), 1)
 
-    def test_resume_nudges_when_original_idle_is_near_threshold(self):
-        # Resume may reset updated_at. Preserve a nearly-expired idle window by
-        # nudging now when the original idle misses the threshold by <= grace.
+    def test_resume_below_threshold_waits_without_early_nudge(self):
+        # Keep the 1800s minimum interval strict; event history keeps the idle
+        # clock intact so the next pass can nudge when the threshold is reached.
         outcome, calls = self._run(
             self._args(),
             ["PAUSED", "STARTING", "RUNNING"],
             activity_offset=1779,
         )
-        self.assertEqual(outcome, "resumed->nudged")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(outcome, "resumed")
+        self.assertEqual(calls, [])
 
     def test_resume_does_not_bypass_minimum_nudge_interval(self):
         # Even though resume resets updated_at, 1000s idle is too early for
