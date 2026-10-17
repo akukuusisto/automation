@@ -143,7 +143,7 @@ class KeepaliveEndToEndTests(unittest.TestCase):
             "OPENHANDS_DRY_RUN": "1" if dry_run else "",
             "OPENHANDS_NUDGE_MODE": "loop",
             "OPENHANDS_IDLE_TIMEOUT": "900",
-            "OPENHANDS_MIN_NUDGE_INTERVAL": "1800",
+            "OPENHANDS_MIN_NUDGE_INTERVAL": "900",
             "OPENHANDS_MAX_STALLED_NUDGES": "4",
             "OPENHANDS_RUN_BUDGET_SECONDS": "420",
             "GITHUB_STEP_SUMMARY": summary,
