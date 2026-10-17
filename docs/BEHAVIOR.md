@@ -64,15 +64,17 @@ agent to move on to rung 3 of the ladder.
 
 ### Idle measurement and nudge rate
 
-Idle time is `now - max(updated_at, latest event timestamp)`.
+Idle time is calculated from the latest timestamped event returned by
+conversation history. `updated_at` is used only if event history cannot be read
+or contains no usable event timestamps. This prevents a sandbox resume or other
+conversation metadata update from resetting the idle clock when event history
+still records the last real activity.
 
-A nudge is normally only sent when idle exceeds **`max(idle-timeout, min-nudge-interval)`**.
-With the defaults (900s / 1800s), the same conversation is normally nudged at
-most once per 30 minutes, even though the workflow runs roughly every 15 minutes.
-There is one bounded resume exception: if a resumed sandbox was already within
-60 seconds of the original nudge threshold, the nudge is sent immediately after
-the sandbox is confirmed `RUNNING`. This can bring the nudge up to 60 seconds
-forward, but avoids resetting `updated_at` and introducing another full wait.
+A nudge is sent only when idle reaches **`max(idle-timeout, min-nudge-interval)`**.
+With the defaults (900s / 1800s), the same conversation is nudged at most once
+per 30 minutes, even though the workflow runs roughly every 15 minutes. After a
+resume below the threshold, the next pass can still measure idle time from the
+older event timestamp and nudge when the original threshold is reached.
 
 ### Open pull request maintenance
 
