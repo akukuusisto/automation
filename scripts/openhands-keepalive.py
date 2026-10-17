@@ -1131,17 +1131,18 @@ def check_conversation(base_url, headers, conv_id, args, state):
                 # enintään idle-timeoutin verran, lähetä nudge nyt eikä vasta
                 # uuden täyden odotusjakson jälkeen.
                 resume_nudge_grace = min(args.idle_timeout, nudge_after // 2)
-                if (
-                    idle_for is not None
-                    and idle_for < nudge_after
-                    and nudge_after - idle_for > resume_nudge_grace
-                ):
-                    print(
-                        f"  Resume valmis, idle {idle_for}s; nudge-rajaan "
-                        f"vielä {nudge_after - idle_for}s "
-                        f"(grace {resume_nudge_grace}s) -> seuraava kierros"
-                    )
-                    return "resumed"
+                if idle_for is not None and idle_for < nudge_after:
+                    remaining_idle = nudge_after - idle_for
+                    if remaining_idle > resume_nudge_grace:
+                        print(
+                            f"  Resume valmis, idle {idle_for}s; nudge-rajaan "
+                            f"vielä {remaining_idle}s "
+                            f"(grace {resume_nudge_grace}s) -> seuraava kierros"
+                        )
+                        return "resumed"
+                    # Mark the threshold as satisfied so the common nudge path
+                    # below actually sends the message in this same pass.
+                    idle_for = nudge_after
                 print(
                     "  Resume valmis; idle riittävän lähellä nudge-rajaa -> "
                     "nudge samalla kierroksella"
