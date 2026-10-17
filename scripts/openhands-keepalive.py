@@ -316,7 +316,7 @@ def parse_args():
     parser.add_argument(
         "--min-nudge-interval",
         type=int,
-        default=int(os.getenv("OPENHANDS_MIN_NUDGE_INTERVAL", "1800")),
+        default=int(os.getenv("OPENHANDS_MIN_NUDGE_INTERVAL", "900")),
         help="Nudgea ei lähetetä samalle conversationille tätä tiheämmin (s)",
     )
     parser.add_argument(
