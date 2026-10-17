@@ -1387,6 +1387,17 @@ class ResumeRecoveryTests(unittest.TestCase):
         self.assertEqual(outcome, "resumed->nudged")
         self.assertEqual(len(calls), 1)
 
+    def test_resume_does_not_bypass_minimum_nudge_interval(self):
+        # Even though resume resets updated_at, 1000s idle is too early for
+        # the configured 1800s minimum interval; the grace only covers jitter.
+        outcome, calls = self._run(
+            self._args(),
+            ["PAUSED", "STARTING", "RUNNING"],
+            activity_offset=1000,
+        )
+        self.assertEqual(outcome, "resumed")
+        self.assertEqual(calls, [])
+
     def test_resume_still_waits_when_original_idle_is_far_below_threshold(self):
         outcome, calls = self._run(
             self._args(),
