@@ -32,6 +32,44 @@ class FakeRequests:
         return FakeResponse(self.payload)
 
 
+class FairRepositoryOrderTests(unittest.TestCase):
+    def test_run_number_rotates_priority_without_changing_members(self):
+        repositories = ["org/repo-c", "org/repo-a", "org/repo-b"]
+        self.assertEqual(
+            MODULE.fair_repository_order(repositories, run_number="0"),
+            ["org/repo-a", "org/repo-b", "org/repo-c"],
+        )
+        self.assertEqual(
+            MODULE.fair_repository_order(repositories, run_number="1"),
+            ["org/repo-b", "org/repo-c", "org/repo-a"],
+        )
+        self.assertEqual(
+            MODULE.fair_repository_order(repositories, run_number="2"),
+            ["org/repo-c", "org/repo-a", "org/repo-b"],
+        )
+
+    def test_each_repository_gets_first_priority_within_one_full_rotation(self):
+        repositories = ["org/repo-a", "org/repo-b", "org/repo-c", "org/repo-d"]
+        first_repositories = [
+            MODULE.fair_repository_order(repositories, run_number=seed)[0]
+            for seed in range(len(repositories))
+        ]
+        self.assertEqual(set(first_repositories), set(repositories))
+
+    def test_local_fallback_uses_fifteen_minute_bucket(self):
+        repositories = ["org/repo-a", "org/repo-b", "org/repo-c"]
+        first = MODULE.fair_repository_order(repositories, now=900 * 10)[0]
+        next_bucket = MODULE.fair_repository_order(repositories, now=900 * 11)[0]
+        self.assertNotEqual(first, next_bucket)
+
+    def test_empty_and_single_repository_lists_are_stable(self):
+        self.assertEqual(MODULE.fair_repository_order([]), [])
+        self.assertEqual(
+            MODULE.fair_repository_order(["org/repo-a"], run_number=99),
+            ["org/repo-a"],
+        )
+
+
 class RecoveryIdempotencyTests(unittest.TestCase):
     def setUp(self):
         self.original_requests = MODULE.requests
